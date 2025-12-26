@@ -7,7 +7,7 @@ from datetime import datetime
 
 # --- 1. 定義欄位與關鍵字 ---
 
-# 單一項目：只要找到這行，就直接抓結果
+# 單一項目 (Simple)
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
@@ -24,28 +24,42 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘"]
 }
 
-# 群組項目：需要掃描多個細項，然後取最大值
-# 只要測項名稱包含這些字根，就會被歸類進來
+# 群組項目 (Group)
+# 邏輯：掃描包含以下關鍵字的行，收集所有結果，最後取最大值
 GROUP_KEYWORDS = {
     "PBB": [
+        # 您指定的標題關鍵字
+        "SUM OF PBBs", "Polybrominated Biphenyls", "PBBs", "多溴聯苯總和",
+        # 細項關鍵字
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
         "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
-        "Decabromobiphenyl", "bromobiphenyl", "溴聯苯", "PBB"
+        "Decabromobiphenyl", "bromobiphenyl"
     ],
     "PBDE": [
+        # 您指定的標題關鍵字
+        "SUM OF PBDEs", "Polybrominated Diphenyl Ethers", "PBDEs", "多溴聯苯醚總和",
+        # 細項關鍵字
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
-        "Decabromodiphenyl ether", "bromodiphenyl ether", "溴聯苯醚", "PBDE"
+        "Decabromodiphenyl ether", "bromodiphenyl ether"
     ],
     "PFAS": [
-        "PFHxA", "PFHxS", "PFOA", "PFNA", "PFDA", "PFUnDA", "PFDoDA", "PFTrDA", "PFTeDA",
-        "FTOH", "FTA", "FTMAC", "FTS", "FTCA", "PFAS", "Perfluoro", "全氟", "Fluorotelomer"
+        # PFAS 常見細項
+        "PFHxA", "PFOA", "PFNA", "PFDA", "PFUnDA", "PFDoDA", "PFTrDA", "PFTeDA",
+        "FTOH", "FTA", "FTMAC", "FTS", "FTCA", "PFAS", "Perfluoro", "全氟"
     ]
 }
 
-# 最終輸出的欄位順序 (PFAS 加在 PFOS 旁邊)
+# ★ PFAS 嚴格啟動條件 (門神) ★
+# 只有整份 PDF 文字中包含以下任一句子，才會去抓 PFAS 欄位
+PFAS_TRIGGER_PHRASES = [
+    "Per- and Polyfluoroalkyl Substances",
+    "PFHxA and its salts",
+    "全氟/多氟烷基物質"
+]
+
 OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
@@ -89,8 +103,8 @@ def parse_value_priority(value_str):
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
-    # 排除 PDF 表格標題誤判
-    if val_lower in ["result", "limit", "mdl", "loq", "unit", "method", "004", "no.1"]: return (0, 0, "")
+    # 排除常見的表頭雜訊
+    if val_lower in ["result", "limit", "mdl", "loq", "unit", "method", "004", "no.1", "---"]: return (0, 0, "")
 
     if "n.d." in val_lower or "nd" == val_lower or "<" in val_lower: return (1, 0, "n.d.")
     if "negative" in val_lower or "陰性" in val_lower: return (2, 0, "Negative")
@@ -107,7 +121,15 @@ def parse_value_priority(value_str):
 
 # --- 3. 核心：動態欄位識別 ---
 
+def check_pfas_trigger(full_text):
+    """檢查整份文件是否包含 PFAS 的啟動關鍵字"""
+    for phrase in PFAS_TRIGGER_PHRASES:
+        if phrase.lower() in full_text.lower():
+            return True
+    return False
+
 def identify_columns(header_row):
+    """識別 Result 位置"""
     item_idx = -1
     result_idx = -1
     
@@ -129,16 +151,27 @@ def process_files(files):
         filename = file.name
         current_date = None
         
-        # 暫存該檔案內的群組數據 (PBB, PBDE, PFAS)
+        # 暫存該檔案內的群組數據
         file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
+        
+        full_text_content = "" # 用於 PFAS 門神判斷
 
         try:
             with pdfplumber.open(file) as pdf:
-                # 1. 抓日期
-                first_page_text = pdf.pages[0].extract_text()
+                # 1. 預讀文字 (抓日期 + PFAS 判斷)
+                for p in pdf.pages:
+                    page_text = p.extract_text()
+                    if page_text:
+                        full_text_content += page_text
+                
+                # 嘗試抓日期 (優先看第一頁)
+                first_page_text = pdf.pages[0].extract_text() if pdf.pages else ""
                 current_date = extract_date_from_text(first_page_text)
                 if current_date:
                     all_dates.append((current_date, filename))
+
+                # ★ PFAS 門神檢查 ★
+                pfas_active = check_pfas_trigger(full_text_content)
 
                 # 2. 抓表格
                 for page in pdf.pages:
@@ -154,40 +187,35 @@ def process_files(files):
                             clean_row = [clean_text(cell) for cell in row]
                             if not any(clean_row): continue
                             
-                            # 找測項名稱
+                            # 找測項
                             target_item_col = item_idx if item_idx != -1 else 0
                             if target_item_col >= len(clean_row): continue
                             item_name = clean_row[target_item_col]
                             
-                            # 跳過標題列
                             if "test item" in item_name.lower() or "測試項目" in item_name: continue
 
                             # 找結果
                             result = ""
-                            # A. 優先用表頭定位
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # B. 備援：倒著找回來 (找 n.d. 或 數字 或 Negative)
+                            # 備援：全列掃描
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
-                                    # 排除空值和顯然不是結果的字
                                     if not cell: continue
                                     if "n.d." in c_lower or "negative" in c_lower or re.search(r"^\d+(\.\d+)?$", cell):
                                         result = cell
                                         break
                             
                             priority = parse_value_priority(result)
-                            if priority[0] == 0: continue # 略過無效值
+                            if priority[0] == 0: continue 
 
-                            # --- A. 匹配單一項目 (Simple) ---
+                            # --- A. Simple 項目 ---
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
                                 for kw in keywords:
-                                    # 精確匹配，避免 PFOS 抓到 PFOS-related
                                     if kw.lower() in item_name.lower():
-                                        if target_key == "PFOS" and "related" in item_name.lower():
-                                            continue 
+                                        if target_key == "PFOS" and "related" in item_name.lower(): continue 
                                         
                                         data_pool[target_key].append({
                                             "priority": priority,
@@ -195,31 +223,28 @@ def process_files(files):
                                         })
                                         break
 
-                            # --- B. 匹配群組項目 (PBB, PBDE, PFAS) ---
+                            # --- B. Group 項目 ---
                             for group_key, keywords in GROUP_KEYWORDS.items():
+                                # PFAS 門神攔截
+                                if group_key == "PFAS" and not pfas_active:
+                                    continue
+
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
-                                        # 1. 排除 "Sum of" 行 (我們自己算)
-                                        if "sum of" in item_name.lower() or "總和" in item_name:
-                                            continue
-                                        
-                                        # 2. 排除 PFOS 本身 (因為它有獨立欄位，不放入 PFAS 群組)
+                                        # 排除 PFOS 避免重複
                                         if group_key == "PFAS" and "pfos" in item_name.lower() and "related" not in item_name.lower():
                                             continue
-
-                                        # 收集該檔案內的細項
+                                        
+                                        # 這裡不再排除 Sum of，如果 Sum of 有抓到值就納入比較
+                                        
                                         file_group_data[group_key].append(priority)
                                         break
             
-            # --- 檔案掃描結束：結算該檔案的 Group 最大值 ---
-            # 這裡會把這份報告裡找到的所有 PBB/PFAS 細項做比較
+            # --- 檔案結算 ---
             for group_key, values in file_group_data.items():
                 if values:
-                    # 排序規則：數值(3) > Negative(2) > n.d.(1)
-                    # 如果都是數值，取最大值
+                    # 取最大值 (數值 > Negative > n.d.)
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
-                    
-                    # 將這個「代表值」存入總池
                     data_pool[group_key].append({
                         "priority": best_in_file,
                         "filename": filename
@@ -230,7 +255,7 @@ def process_files(files):
 
         progress_bar.progress((i + 1) / len(files))
 
-    # --- 4. 聚合 (跨檔案比對) ---
+    # --- 4. 聚合 ---
     final_row = {}
     max_val_filename = "" 
     global_max_score = -1
@@ -243,18 +268,15 @@ def process_files(files):
             final_row[key] = "" 
             continue
             
-        # 跨檔案排序，取最好的結果
         best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
         final_row[key] = best_record['priority'][2]
         
-        # 判斷最大值檔案
         if best_record['priority'][0] > global_max_score:
             global_max_score = best_record['priority'][0]
             max_val_filename = best_record['filename']
         elif best_record['priority'][0] == 3 and global_max_score == 3:
              max_val_filename = best_record['filename']
 
-    # 日期處理
     final_date_str = ""
     latest_file_name_by_date = ""
     if all_dates:
@@ -264,7 +286,6 @@ def process_files(files):
     
     final_row["日期"] = final_date_str
     
-    # 決定顯示哪份檔案名稱
     if global_max_score == 3: 
         final_row["檔案名稱"] = max_val_filename
     else:
@@ -273,9 +294,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v7.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v7.0)")
-st.info("💡 v7.0 更新：加入 PFAS 欄位，並支援 PBB/PBDE/PFAS 細項掃描自動取最大值。")
+st.set_page_config(page_title="SGS 報告聚合工具 v9.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v9.0 最終修正版)")
+st.info("💡 更新：\n1. PBB/PBDE 加入標題關鍵字 (SUM OF...)。\n2. PFAS 增加嚴格關鍵字檢查 (Per- and Polyfluoroalkyl Substances)。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -286,7 +307,6 @@ if uploaded_files:
         result_data = process_files(uploaded_files)
         df = pd.DataFrame(result_data)
         
-        # 確保欄位順序正確
         for col in OUTPUT_COLUMNS:
             if col not in df.columns: df[col] = ""
         df = df[OUTPUT_COLUMNS]
@@ -298,7 +318,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v7.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v9.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

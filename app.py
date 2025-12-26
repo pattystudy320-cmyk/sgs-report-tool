@@ -7,8 +7,7 @@ from datetime import datetime
 
 # --- 1. 定義欄位與關鍵字 ---
 
-# 這些是需要 "抓數值" 的項目
-# ★ v21.0 修正：移除單字母關鍵字，改用全名，避免誤抓 CAS No.
+# 抓數值的項目
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
@@ -18,34 +17,48 @@ SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    # ★ PFOS: 只抓全名，避免抓到參考表中的 PFOS-K, PFOS-Li 等衍生物
+    # PFOS 只抓主測項，不抓參考表
     "PFOS": ["Perfluorooctane sulfonates", "全氟辛烷磺酸", "Perfluorooctane sulfonate"], 
-    # ★ 鹵素: 只抓全名，避免 F 抓到 CAS No. 或其他單字
+    # 鹵素抓全名
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
     "I": ["Iodine", "碘"]
 }
 
-# 這些是需要 "抓群組最大值" 的項目
+# 抓群組最大值的項目 (擴充 Intertek 寫法)
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和",
+        # SGS 寫法
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
         "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
-        "Decabromobiphenyl", "bromobiphenyl"
+        "Decabromobiphenyl", 
+        # Intertek 寫法 (Monobrominated...)
+        "Monobrominated", "Dibrominated", "Tribrominated", 
+        "Tetrabrominated", "Pentabrominated", "Hexabrominated", 
+        "Heptabrominated", "Octabrominated", "Nonabrominated", 
+        "Decabrominated",
+        "bromobiphenyl"
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和",
+        # SGS 寫法
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
-        "Decabromodiphenyl ether", "bromodiphenyl ether"
+        "Decabromodiphenyl ether", 
+        # Intertek 寫法
+        "Monobrominated Diphenyl", "Dibrominated Diphenyl", "Tribrominated Diphenyl",
+        "Tetrabrominated Diphenyl", "Pentabrominated Diphenyl", "Hexabrominated Diphenyl",
+        "Heptabrominated Diphenyl", "Octabrominated Diphenyl", "Nonabrominated Diphenyl",
+        "Decabrominated Diphenyl",
+        "bromodiphenyl ether"
     ]
 }
 
-# PFAS 關鍵字 (只用於檢查前兩頁摘要，判定是否顯示 REPORT)
+# PFAS 摘要檢查關鍵字
 PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances",
     "PFAS",
@@ -74,7 +87,7 @@ def extract_date_from_text(text):
     patterns = [
         r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", # 2023/03/03
         r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", # 06-Jan-2025
-        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})" # Dec. 26, 2024
+        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})" # Oct 24, 2022
     ]
     
     found_dates = []
@@ -102,7 +115,6 @@ def extract_date_from_text(text):
     return None
 
 def is_suspicious_limit_value(val):
-    """數值防火牆"""
     try:
         n = float(val)
         if n in [1000.0, 100.0, 50.0]: return True
@@ -121,16 +133,14 @@ def parse_value_priority(value_str):
     if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits"]: 
         return (0, 0, "")
 
-    # 忽略 CAS No 格式 (如 163702-05-4)
-    if re.search(r"\d+-\d+-\d+", val):
-        return (0, 0, "")
-
+    if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") # 排除 CAS No
     if is_suspicious_limit_value(val): return (0, 0, "") 
 
+    # ★ v22.0: 強制大寫 ★
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: 
-        return (1, 0, "n.d.")
+        return (1, 0, "N.D.")
     if "negative" in val_lower or "陰性" in val_lower: 
-        return (2, 0, "Negative")
+        return (2, 0, "NEGATIVE")
     
     num_match = re.search(r"([\d\.]+)", val)
     if num_match:
@@ -141,13 +151,12 @@ def parse_value_priority(value_str):
             
     return (0, 0, val)
 
-# --- 3. 核心：智慧欄位識別 ---
+# --- 3. 核心邏輯 ---
 
 def check_pfas_in_summary(text):
     txt_lower = text.lower()
     for kw in PFAS_SUMMARY_KEYWORDS:
-        if kw.lower() in txt_lower:
-            return True
+        if kw.lower() in txt_lower: return True
     return False
 
 def identify_columns(table):
@@ -159,12 +168,10 @@ def identify_columns(table):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    # ★ v21.0 關鍵：強制跳過參考表 ★
-    # 如果標題包含 "Group Name", "Substance Name", "CAS No" (SGS 的 PFAS 清單特徵)
-    # 且沒有明確的 "Result" 欄位，就直接跳過
-    if ("group name" in full_header_text or "substance name" in full_header_text or "cas no" in full_header_text or "restricted substances" in full_header_text) and \
+    # 排除限值表/參考表
+    if ("restricted substances" in full_header_text or "limits" in full_header_text or "substance name" in full_header_text or "cas no" in full_header_text) and \
        not any(x in full_header_text for x in ["result", "結果", "00", "no.", "green"]):
-        return -1, -1, True # Skip
+        return -1, -1, True 
 
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
@@ -197,7 +204,7 @@ def process_files(files):
                 file_dates = []
                 first_few_pages_text = ""
                 
-                # 1. 抓日期 & 檢查 PFAS 摘要 (掃描前2頁)
+                # 1. 日期 & PFAS
                 for p_idx in range(min(2, len(pdf.pages))):
                     page_txt = pdf.pages[p_idx].extract_text()
                     if page_txt:
@@ -207,11 +214,10 @@ def process_files(files):
                 
                 if file_dates: all_dates.append((max(file_dates), filename))
                 
-                # PFAS 判定 (REPORT)
                 if check_pfas_in_summary(first_few_pages_text):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
-                # 2. 抓表格 (RoHS 數值)
+                # 2. 表格掃描
                 last_result_idx = -1 
                 last_item_idx = 0
 
@@ -263,16 +269,12 @@ def process_files(files):
                             priority = parse_value_priority(result)
                             if priority[0] == 0: continue 
 
-                            # Simple Keywords
+                            # Simple
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
                                         if target_key == "PFOS" and "related" in item_name.lower(): continue 
-                                        
-                                        data_pool[target_key].append({
-                                            "priority": priority,
-                                            "filename": filename
-                                        })
+                                        data_pool[target_key].append({"priority": priority, "filename": filename})
                                         
                                         if target_key == "Pb":
                                             current_score = priority[0]
@@ -289,16 +291,17 @@ def process_files(files):
                                                     pb_tracker["filenames"].append(filename)
                                         break
 
-                            # Group Keywords
+                            # Group
                             for group_key, keywords in GROUP_KEYWORDS.items():
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
                                         file_group_data[group_key].append(priority)
                                         break
             
-            # 檔案結算
+            # 檔案結算 (PBB/PBDE)
             for group_key, values in file_group_data.items():
                 if values:
+                    # 取出該檔案內該群組的最大值
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
                     data_pool[group_key].append({
                         "priority": best_in_file,
@@ -339,9 +342,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v21.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v21.0 最終精準版)")
-st.info("💡 v21.0：修正 F/PFOS 誤抓 CAS No. 問題，強化表格過濾機制，日期抓取全格式支援。")
+st.set_page_config(page_title="SGS 報告聚合工具 v22.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v22.0)")
+st.info("💡 v22.0：擴充 Intertek PBB/PBDE 關鍵字，結果強制顯示為 N.D./NEGATIVE 大寫。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -362,7 +365,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v21.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v22.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

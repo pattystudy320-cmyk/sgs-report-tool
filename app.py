@@ -25,14 +25,16 @@ SIMPLE_KEYWORDS = {
 
 GROUP_KEYWORDS = {
     "PBB": [
-        "PBBs", "Polybrominated Biphenyls", "Sum of PBBs", "多溴聯苯總和",
+        "Polybrominated Biphenyls (PBBs)", # 您指定的關鍵字
+        "Sum of PBBs", "多溴聯苯總和",
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
         "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
         "Decabromobiphenyl", "bromobiphenyl"
     ],
     "PBDE": [
-        "PBDEs", "Polybrominated Diphenyl Ethers", "Sum of PBDEs", "多溴聯苯醚總和",
+        "Polybrominated Diphenyl Ethers (PBDEs)", # 您指定的關鍵字
+        "Sum of PBDEs", "多溴聯苯醚總和",
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
@@ -64,54 +66,51 @@ def clean_text(text):
     return str(text).replace('\n', ' ').strip()
 
 def extract_date_from_text(text):
-    """
-    強力日期抓取
-    """
     text = clean_text(text)
-    # 支援格式：
-    # 06-Jan-2025
-    # 2025/01/06, 2025.01.06, 2025-01-06
-    # Jan 06, 2025
+    # 強力日期匹配：包含 Date: 2025/01/01 或 Issue Date: 06-Jan-2025
     patterns = [
-        r"([0-9]{2}-[a-zA-Z]{3}-[0-9]{4})", 
-        r"([0-9]{4})[/\.-]([0-9]{1,2})[/\.-]([0-9]{1,2})",
-        r"([a-zA-Z]{3})\s+([0-9]{1,2})[,]\s+([0-9]{4})"
+        r"(?:Date|日期|Issue).*?([0-9]{4})[/\.-]([0-9]{1,2})[/\.-]([0-9]{1,2})", # 2025/01/06
+        r"(?:Date|日期|Issue).*?([0-9]{2}-[a-zA-Z]{3}-[0-9]{4})", # 06-Jan-2025
+        r"([0-9]{4})[/\.-]([0-9]{1,2})[/\.-]([0-9]{1,2})" # 純日期格式 (備援)
     ]
     
-    found_dates = []
     for pattern in patterns:
         matches = re.finditer(pattern, text, re.IGNORECASE)
         for match in matches:
             try:
-                dt = None
                 groups = match.groups()
-                if len(groups) == 1 and "-" in groups[0]: # 06-Jan-2025
-                    dt = datetime.strptime(groups[0], "%d-%b-%Y")
-                elif len(groups) == 3:
-                    if groups[0].isdigit(): # 2025/01/06
-                        dt = datetime(int(groups[0]), int(groups[1]), int(groups[2]))
-                    else: # Jan 06, 2025
-                        dt = datetime.strptime(f"{groups[1]}-{groups[0]}-{groups[2]}", "%d-%b-%Y")
-                
-                if dt: found_dates.append(dt)
+                if len(groups) == 3: # YYYY/MM/DD
+                    return datetime(int(groups[0]), int(groups[1]), int(groups[2]))
+                elif len(groups) == 1: # DD-Mon-YYYY
+                    return datetime.strptime(groups[0], "%d-%b-%Y")
             except: continue
-            
-    # 如果抓到多個日期，回傳最大(最新)的那個
-    if found_dates:
-        return max(found_dates)
     return None
 
 def parse_value_priority(value_str):
+    """
+    數值解析邏輯：
+    回傳 (分數, 數值, 顯示文字)
+    3: 有數值 (10.5)
+    2: Negative
+    1: N.D.
+    0: 無效
+    """
+    # 移除單位與雜訊
     val = clean_text(value_str).replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
     
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
-    if val_lower in ["result", "limit", "mdl", "loq", "unit", "method", "004", "no.1", "---"]: return (0, 0, "")
+    # 排除不是結果的字
+    if val_lower in ["result", "limit", "mdl", "loq", "unit", "method", "004", "no.1", "---", "-"]: 
+        return (0, 0, "")
 
-    if "n.d." in val_lower or "nd" == val_lower or "<" in val_lower: return (1, 0, "n.d.")
-    if "negative" in val_lower or "陰性" in val_lower: return (2, 0, "Negative")
+    if "n.d." in val_lower or "nd" == val_lower or "<" in val_lower: 
+        return (1, 0, "n.d.")
+    if "negative" in val_lower or "陰性" in val_lower: 
+        return (2, 0, "Negative")
     
+    # 抓取純數字 (包含小數點)
     num_match = re.search(r"([\d\.]+)", val)
     if num_match:
         try:
@@ -130,6 +129,9 @@ def check_pfas_trigger(full_text):
     return False
 
 def identify_columns(header_row):
+    """
+    智慧判斷 Result 在哪一欄
+    """
     item_idx = -1
     result_idx = -1
     
@@ -144,10 +146,10 @@ def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     all_dates = []
     
-    # 專門用來追蹤 Pb 的最大值檔案
+    # Pb 最大值追蹤器
     pb_tracker = {
-        "max_score": -1,
-        "max_value": -1,
+        "max_score": -1, # 0=無, 1=nd, 2=neg, 3=num
+        "max_value": -1.0,
         "filename": ""
     }
     
@@ -161,28 +163,26 @@ def process_files(files):
 
         try:
             with pdfplumber.open(file) as pdf:
-                # 1. 抓日期 (掃描前兩頁)
+                # 1. 抓日期 (掃描前三頁，範圍擴大)
                 date_found = None
-                for p_idx in range(min(2, len(pdf.pages))):
+                for p_idx in range(min(3, len(pdf.pages))):
                     page_txt = pdf.pages[p_idx].extract_text()
                     if page_txt:
                         full_text_content += page_txt
-                        d = extract_date_from_text(page_txt)
-                        if d and not date_found: 
-                            date_found = d
+                        if not date_found:
+                            d = extract_date_from_text(page_txt)
+                            if d: date_found = d
                             
                 if date_found:
                     all_dates.append((date_found, filename))
                 
-                # 補讀其他頁文字供 PFAS 判斷
-                for p in pdf.pages[2:]:
+                # 補讀剩餘頁面
+                for p in pdf.pages[3:]:
                     full_text_content += (p.extract_text() or "")
 
                 pfas_active = check_pfas_trigger(full_text_content)
 
                 # 2. 抓表格
-                
-                # ★ 表頭記憶變數：若遇到沒表頭的表格，沿用上一個的設定
                 last_result_idx = -1 
                 last_item_idx = 0
 
@@ -194,23 +194,20 @@ def process_files(files):
                         header_row = table[0]
                         item_idx, result_idx = identify_columns(header_row)
                         
-                        # ★ 表頭記憶邏輯
+                        # 表頭記憶：如果當前表格沒表頭，沿用上一個
                         if result_idx != -1:
                             last_result_idx = result_idx
                             last_item_idx = item_idx if item_idx != -1 else 0
                         else:
-                            # 沒抓到表頭，使用上一次成功的設定
                             if last_result_idx != -1:
                                 result_idx = last_result_idx
                                 item_idx = last_item_idx
                         
                         for row_idx, row in enumerate(table):
-                            # 若這行是表頭，跳過
                             clean_row = [clean_text(cell) for cell in row]
+                            # 跳過顯然是表頭的行
                             row_text_joined = "".join(clean_row).lower()
-                            if "test item" in row_text_joined or "result" in row_text_joined:
-                                continue
-                                
+                            if "test item" in row_text_joined or "result" in row_text_joined: continue
                             if not any(clean_row): continue
                             
                             # 找測項
@@ -220,23 +217,26 @@ def process_files(files):
                             
                             # 找結果
                             result = ""
-                            # A. 優先用定位
+                            # 優先：依欄位索引
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # B. 備援
+                            # 備援：特徵搜尋 (找 nd 或 數字)
+                            # 針對 "Tin Layer" 這種格式，有時候 Result 在 Unit 的後面
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
                                     if not cell: continue
                                     if "n.d." in c_lower or "negative" in c_lower or re.search(r"^\d+(\.\d+)?$", cell):
+                                        # 簡單過濾：如果這格長得像 MDL (整數 2, 5, 10)，且前面還有一格也是數字，可能抓錯
+                                        # 但這裡先相信它
                                         result = cell
                                         break
                             
                             priority = parse_value_priority(result)
                             if priority[0] == 0: continue 
 
-                            # --- A. Simple (含 Pb 追蹤) ---
+                            # --- A. Simple (Pb/Cd...) ---
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
@@ -247,21 +247,20 @@ def process_files(files):
                                             "filename": filename
                                         })
                                         
-                                        # ★ Pb 檔案追蹤邏輯 ★
+                                        # ★ Pb 最大值檔案追蹤 ★
                                         if target_key == "Pb":
-                                            # 如果分數更高 (有值 > n.d.)
+                                            # 邏輯：有數值(3) > Negative(2) > n.d.(1)
+                                            # 如果找到更大的分數，或者同分但數值更大，就更新
                                             if priority[0] > pb_tracker["max_score"]:
                                                 pb_tracker["max_score"] = priority[0]
                                                 pb_tracker["max_value"] = priority[1]
                                                 pb_tracker["filename"] = filename
-                                            # 如果都是數值，比大小
                                             elif priority[0] == 3 and priority[1] > pb_tracker["max_value"]:
                                                 pb_tracker["max_value"] = priority[1]
                                                 pb_tracker["filename"] = filename
-                                                
                                         break
 
-                            # --- B. Group ---
+                            # --- B. Group (PBB/PBDE/PFAS) ---
                             for group_key, keywords in GROUP_KEYWORDS.items():
                                 if group_key == "PFAS" and not pfas_active: continue
 
@@ -270,12 +269,14 @@ def process_files(files):
                                         if group_key == "PFAS" and "pfos" in item_name.lower() and "related" not in item_name.lower():
                                             continue
                                         
+                                        # 不管是不是 "Sum of"，只要抓到就納入計算
                                         file_group_data[group_key].append(priority)
                                         break
             
-            # --- 檔案結算 (Group) ---
+            # --- 檔案結算 (PBB/PBDE/PFAS) ---
             for group_key, values in file_group_data.items():
                 if values:
+                    # 邏輯：一份報告中，只要有一個細項是數值，就取最大值。全都是 n.d. 才是 n.d.
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
                     data_pool[group_key].append({
                         "priority": best_in_file,
@@ -298,34 +299,33 @@ def process_files(files):
             final_row[key] = "" 
             continue
             
+        # 取所有報告中最大的那個值
         best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
         final_row[key] = best_record['priority'][2]
 
     # 日期處理 (取最新)
     final_date_str = ""
+    latest_file = ""
     if all_dates:
         latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
         final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
+        latest_file = latest_date_record[1] # 備用：日期最新的檔案
     
     final_row["日期"] = final_date_str
     
-    # ★ 檔案名稱邏輯：顯示 Pb 值最大的那個檔案 ★
-    # 如果完全沒抓到 Pb (極少見)，則退回使用日期最新的檔案
+    # ★ 檔案名稱邏輯：顯示 Pb 值最大的檔案 ★
     if pb_tracker["filename"]:
         final_row["檔案名稱"] = pb_tracker["filename"]
     else:
-        # Fallback
-        if all_dates:
-            final_row["檔案名稱"] = sorted(all_dates, key=lambda x: x[0], reverse=True)[0][1]
-        else:
-            final_row["檔案名稱"] = files[0].name if files else ""
+        # 如果 Pb 全都沒抓到，改顯示日期最新的檔案 (防呆)
+        final_row["檔案名稱"] = latest_file if latest_file else (files[0].name if files else "")
 
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v10.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v10.0 完美版)")
-st.info("💡 v10.0 更新：修復 PBB/PBDE 表格抓取(表頭記憶)、指定 Pb 最大值檔案名稱、增強日期辨識。")
+st.set_page_config(page_title="SGS 報告聚合工具 v11.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v11.0)")
+st.info("💡 更新：修正 Pb 最大值檔案追蹤、日期格式支援、PBB/PBDE 群組關鍵字。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -347,7 +347,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v10.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v11.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

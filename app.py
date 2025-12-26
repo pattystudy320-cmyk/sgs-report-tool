@@ -96,7 +96,6 @@ def parse_value_priority(value_str):
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
-    # ★ 更新排除清單：加入 "001" ★
     if val_lower in ["result", "limit", "mdl", "loq", "unit", "method", "004", "001", "no.1", "---", "-"]: 
         return (0, 0, "")
 
@@ -123,17 +122,12 @@ def check_pfas_trigger(full_text):
     return False
 
 def identify_columns(header_row):
-    """
-    智慧判斷 Result 在哪一欄
-    """
     item_idx = -1
     result_idx = -1
     
     for i, cell in enumerate(header_row):
         txt = clean_text(cell).lower()
         if "test item" in txt or "tested item" in txt or "測試項目" in txt: item_idx = i
-        
-        # ★ 更新識別邏輯：加入 "001" ★
         if "result" in txt or "結果" in txt or "001" in txt or "004" in txt or "no.1" in txt: 
             result_idx = i
             
@@ -222,7 +216,7 @@ def process_files(files):
                             priority = parse_value_priority(result)
                             if priority[0] == 0: continue 
 
-                            # --- A. Simple ---
+                            # --- A. Simple (含 Pb 追蹤) ---
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
@@ -233,7 +227,7 @@ def process_files(files):
                                             "filename": filename
                                         })
                                         
-                                        # Pb 檔案追蹤 (支援多檔)
+                                        # Pb 檔案追蹤
                                         if target_key == "Pb":
                                             current_score = priority[0]
                                             current_val = priority[1]
@@ -278,51 +272,4 @@ def process_files(files):
 
         progress_bar.progress((i + 1) / len(files))
 
-    # --- 4. 聚合 ---
-    final_row = {}
-
-    for key in OUTPUT_COLUMNS:
-        if key in ["日期", "檔案名稱"]: continue
-        
-        candidates = data_pool.get(key, [])
-        if not candidates:
-            final_row[key] = "" 
-            continue
-            
-        best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
-        final_row[key] = best_record['priority'][2]
-
-    # 日期處理
-    final_date_str = ""
-    latest_file = ""
-    if all_dates:
-        latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
-        final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
-        latest_file = latest_date_record[1]
-    
-    final_row["日期"] = final_date_str
-    
-    if pb_tracker["filenames"]:
-        final_row["檔案名稱"] = ", ".join(pb_tracker["filenames"])
-    else:
-        final_row["檔案名稱"] = latest_file if latest_file else (files[0].name if files else "")
-
-    return [final_row]
-
-# --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v13.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v13.0 廣泛支援版)")
-st.info("💡 v13.0 更新：支援 '001', '004', 'No.1' 等多種結果欄位標題。")
-
-uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
-
-if uploaded_files:
-    if st.button("🔄 重新執行"): st.rerun()
-
-    try:
-        result_data = process_files(uploaded_files)
-        df = pd.DataFrame(result_data)
-        
-        for col in OUTPUT_COLUMNS:
-            if col not in df.columns: df[col] = ""
-        df = df[OUTPUT_COLUMNS]
+    # --- 4.

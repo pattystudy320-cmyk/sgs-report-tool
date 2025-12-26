@@ -17,25 +17,21 @@ SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    # PFOS 只抓主測項，不抓參考表
     "PFOS": ["Perfluorooctane sulfonates", "全氟辛烷磺酸", "Perfluorooctane sulfonate"], 
-    # 鹵素抓全名
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
     "I": ["Iodine", "碘"]
 }
 
-# 抓群組最大值的項目 (擴充 Intertek 寫法)
+# 抓群組最大值的項目
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和",
-        # SGS 寫法
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
         "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
         "Decabromobiphenyl", 
-        # Intertek 寫法 (Monobrominated...)
         "Monobrominated", "Dibrominated", "Tribrominated", 
         "Tetrabrominated", "Pentabrominated", "Hexabrominated", 
         "Heptabrominated", "Octabrominated", "Nonabrominated", 
@@ -44,12 +40,10 @@ GROUP_KEYWORDS = {
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和",
-        # SGS 寫法
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
         "Decabromodiphenyl ether", 
-        # Intertek 寫法
         "Monobrominated Diphenyl", "Dibrominated Diphenyl", "Tribrominated Diphenyl",
         "Tetrabrominated Diphenyl", "Pentabrominated Diphenyl", "Hexabrominated Diphenyl",
         "Heptabrominated Diphenyl", "Octabrominated Diphenyl", "Nonabrominated Diphenyl",
@@ -83,11 +77,10 @@ def clean_text(text):
 
 def extract_date_from_text(text):
     text = clean_text(text)
-    
     patterns = [
-        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", # 2023/03/03
-        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", # 06-Jan-2025
-        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})" # Oct 24, 2022
+        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", 
+        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", 
+        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})" 
     ]
     
     found_dates = []
@@ -99,19 +92,15 @@ def extract_date_from_text(text):
                 full_match = match.group(0)
                 clean_str = full_match.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
                 clean_str = " ".join(clean_str.split())
-                
                 for fmt in ["%Y %m %d", "%d %b %Y", "%b %d %Y"]:
                     try:
                         dt = datetime.strptime(clean_str, fmt)
                         break
                     except: continue
-                
                 if dt and 2000 <= dt.year <= 2030: 
                     found_dates.append(dt)
             except: continue
-            
-    if found_dates:
-        return max(found_dates)
+    if found_dates: return max(found_dates)
     return None
 
 def is_suspicious_limit_value(val):
@@ -124,23 +113,20 @@ def is_suspicious_limit_value(val):
 def parse_value_priority(value_str):
     raw_val = clean_text(value_str)
     if "(" in raw_val: raw_val = raw_val.split("(")[0].strip()
-    
     val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
     
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
+    # 排除清單 (注意：這裡不排除 "limit" 字眼，因為 SGS 的 limit 是標題，不是數值)
     if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits"]: 
         return (0, 0, "")
 
-    if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") # 排除 CAS No
+    if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
     if is_suspicious_limit_value(val): return (0, 0, "") 
 
-    # ★ v22.0: 強制大寫 ★
-    if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: 
-        return (1, 0, "N.D.")
-    if "negative" in val_lower or "陰性" in val_lower: 
-        return (2, 0, "NEGATIVE")
+    if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: return (1, 0, "N.D.")
+    if "negative" in val_lower or "陰性" in val_lower: return (2, 0, "NEGATIVE")
     
     num_match = re.search(r"([\d\.]+)", val)
     if num_match:
@@ -151,7 +137,7 @@ def parse_value_priority(value_str):
             
     return (0, 0, val)
 
-# --- 3. 核心邏輯 ---
+# --- 3. 核心：智慧欄位識別 ---
 
 def check_pfas_in_summary(text):
     txt_lower = text.lower()
@@ -160,6 +146,9 @@ def check_pfas_in_summary(text):
     return False
 
 def identify_columns(table):
+    """
+    v23.0: 精準區分「SGS 主表格」與「限值/參考表格」
+    """
     item_idx = -1
     result_idx = -1
     
@@ -168,11 +157,9 @@ def identify_columns(table):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    # 排除限值表/參考表
-    if ("restricted substances" in full_header_text or "limits" in full_header_text or "substance name" in full_header_text or "cas no" in full_header_text) and \
-       not any(x in full_header_text for x in ["result", "結果", "00", "no.", "green"]):
-        return -1, -1, True 
-
+    # 1. 識別結果欄位 (關鍵步驟)
+    # 尋找 001~009, Result, No.1, Green material
+    # SGS 的關鍵是 "001", "002"
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
         for c_idx, cell in enumerate(row):
@@ -182,11 +169,23 @@ def identify_columns(table):
             if "test item" in txt or "tested item" in txt or "測試項目" in txt:
                 if item_idx == -1: item_idx = c_idx
             
+            # 結果欄位關鍵字
             if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
                 "no." in txt or "green" in txt or "submitted" in txt or "composite" in txt):
-                if result_idx == -1: result_idx = c_idx
+                # 再次確認不是 CAS No
+                if "cas" not in txt:
+                    if result_idx == -1: result_idx = c_idx
 
-    return item_idx, result_idx, False
+    # 2. 判斷是否為「要跳過」的表格
+    # 只有當它是 "限用物質清單" 或 "PFAS 參考表"，且**找不到**結果欄位時，才跳過
+    # SGS 主表格雖然有 "Limit"，但也有 "002"，所以 result_idx 會被找到，這裡就不會跳過 -> 修正成功！
+    is_reference_table = False
+    if result_idx == -1: # 只有在找不到結果欄時，才去檢查是否為參考表
+        if ("restricted substances" in full_header_text or "limits" in full_header_text or 
+            "group name" in full_header_text or "substance name" in full_header_text):
+            is_reference_table = True
+
+    return item_idx, result_idx, is_reference_table
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
@@ -230,6 +229,7 @@ def process_files(files):
                         
                         if is_skip_table: continue 
 
+                        # 表頭記憶
                         if result_idx != -1:
                             last_result_idx = result_idx
                             last_item_idx = item_idx if item_idx != -1 else 0
@@ -251,9 +251,11 @@ def process_files(files):
                             if "pvc" in item_name.lower() or "polyvinyl" in item_name.lower(): continue
 
                             result = ""
+                            # A. 優先用定位 (SGS 會走這裡，直接抓 002 那一欄)
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
+                            # B. 備援 (倒著找，但有防火牆)
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -262,7 +264,7 @@ def process_files(files):
                                         result = cell
                                         break
                                     if re.search(r"^\d+(\.\d+)?$", cell):
-                                        if float(cell) in [1000, 100, 50]: continue
+                                        if float(cell) in [1000, 100, 50]: continue # 防火牆
                                         result = cell
                                         break
                             
@@ -301,7 +303,6 @@ def process_files(files):
             # 檔案結算 (PBB/PBDE)
             for group_key, values in file_group_data.items():
                 if values:
-                    # 取出該檔案內該群組的最大值
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
                     data_pool[group_key].append({
                         "priority": best_in_file,
@@ -342,9 +343,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v22.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v22.0)")
-st.info("💡 v22.0：擴充 Intertek PBB/PBDE 關鍵字，結果強制顯示為 N.D./NEGATIVE 大寫。")
+st.set_page_config(page_title="SGS 報告聚合工具 v23.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v23.0)")
+st.info("💡 v23.0：修正 SGS 主表格略過問題，支援含 Limit/001 的混合表格，結果大寫顯示。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -365,7 +366,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v22.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v23.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

@@ -85,6 +85,7 @@ def extract_date_from_text(text):
 def parse_value_priority(value_str):
     raw_val = clean_text(value_str)
     
+    # 處理特殊格式: 0.01 (100) -> 切除括號後面的限值
     if "(" in raw_val:
         raw_val = raw_val.split("(")[0].strip()
         
@@ -93,11 +94,10 @@ def parse_value_priority(value_str):
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
-    # 排除清單加入 "001", "004", "no.1"
-    if val_lower in ["result", "limit", "mdl", "loq", "unit", "method", "004", "001", "no.1", "---", "-"]: 
+    # 排除清單 (黑名單)
+    if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-"]: 
         return (0, 0, "")
 
-    # 強制統一 N.D. 格式
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: 
         return (1, 0, "n.d.")
     if "negative" in val_lower or "陰性" in val_lower: 
@@ -112,7 +112,7 @@ def parse_value_priority(value_str):
             
     return (0, 0, val)
 
-# --- 3. 核心邏輯 ---
+# --- 3. 核心：智慧欄位識別 (黑名單機制) ---
 
 def check_pfas_trigger(full_text):
     for phrase in PFAS_TRIGGER_PHRASES:
@@ -121,18 +121,36 @@ def check_pfas_trigger(full_text):
     return False
 
 def identify_columns(header_row):
+    """
+    回傳:
+    1. item_idx (測項)
+    2. result_idx (結果)
+    3. exclude_indices (黑名單：絕對不能讀的欄位，如 Limit, MDL, Unit)
+    """
     item_idx = -1
     result_idx = -1
+    exclude_indices = set()
     
     for i, cell in enumerate(header_row):
         txt = clean_text(cell).lower()
-        if "test item" in txt or "tested item" in txt or "測試項目" in txt: item_idx = i
         
-        # 增加 001, 004, No.1 的判斷
+        # 1. 標記測項
+        if "test item" in txt or "tested item" in txt or "測試項目" in txt:
+            item_idx = i
+            continue
+            
+        # 2. 標記黑名單 (Limit, MDL, Unit, Method)
+        # 這些欄位絕對不是結果，標記起來，之後掃描時跳過
+        if any(x in txt for x in ["limit", "mdl", "loq", "rl", "unit", "method", "限值", "單位", "方法"]):
+            exclude_indices.add(i)
+            continue
+        
+        # 3. 標記結果
+        # 只有當它包含 Result 關鍵字，且沒有被上面的黑名單攔截時
         if "result" in txt or "結果" in txt or "001" in txt or "004" in txt or "no.1" in txt: 
             result_idx = i
             
-    return item_idx, result_idx
+    return item_idx, result_idx, exclude_indices
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
@@ -148,7 +166,6 @@ def process_files(files):
     
     for i, file in enumerate(files):
         filename = file.name
-        
         file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
         full_text_content = ""
 
@@ -163,18 +180,17 @@ def process_files(files):
                         if not date_found:
                             d = extract_date_from_text(page_txt)
                             if d: date_found = d
-                            
-                if date_found:
-                    all_dates.append((date_found, filename))
+                if date_found: all_dates.append((date_found, filename))
                 
+                # 補讀文字
                 for p in pdf.pages[3:]:
                     full_text_content += (p.extract_text() or "")
-
                 pfas_active = check_pfas_trigger(full_text_content)
 
                 # 抓表格
                 last_result_idx = -1 
                 last_item_idx = 0
+                last_exclude_indices = set()
 
                 for page in pdf.pages:
                     tables = page.extract_tables()
@@ -182,20 +198,24 @@ def process_files(files):
                         if not table or len(table) < 2: continue
                         
                         header_row = table[0]
-                        item_idx, result_idx = identify_columns(header_row)
+                        item_idx, result_idx, exclude_indices = identify_columns(header_row)
                         
+                        # 表頭記憶邏輯
                         if result_idx != -1:
                             last_result_idx = result_idx
                             last_item_idx = item_idx if item_idx != -1 else 0
+                            last_exclude_indices = exclude_indices
                         else:
+                            # 沿用上一個表格的設定 (針對 PBB 跨頁)
                             if last_result_idx != -1:
                                 result_idx = last_result_idx
                                 item_idx = last_item_idx
+                                exclude_indices = last_exclude_indices
                         
                         for row_idx, row in enumerate(table):
                             clean_row = [clean_text(cell) for cell in row]
-                            row_text_joined = "".join(clean_row).lower()
-                            if "test item" in row_text_joined or "result" in row_text_joined: continue
+                            row_txt = "".join(clean_row).lower()
+                            if "test item" in row_txt or "result" in row_txt: continue
                             if not any(clean_row): continue
                             
                             target_item_col = item_idx if item_idx != -1 else 0
@@ -203,13 +223,23 @@ def process_files(files):
                             item_name = clean_row[target_item_col]
                             
                             result = ""
+                            # 策略 A: 明確知道結果在哪一欄
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
+                            # 策略 B: 備援掃描 (最危險的步驟，加上防護)
                             if not result:
-                                for cell in reversed(clean_row):
+                                # 倒著找，但要避開黑名單 (Limit, MDL)
+                                for col_i in range(len(clean_row)-1, -1, -1):
+                                    # ★ 關鍵修正：如果這一欄是 Limit/MDL，跳過！
+                                    if col_i in exclude_indices:
+                                        continue
+                                    
+                                    cell = clean_row[col_i]
                                     c_lower = cell.lower()
                                     if not cell: continue
+                                    
+                                    # 找 n.d. 或 數字
                                     if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower or re.search(r"^\d+(\.\d+)?", cell):
                                         result = cell
                                         break
@@ -228,11 +258,10 @@ def process_files(files):
                                             "filename": filename
                                         })
                                         
-                                        # Pb 檔案追蹤
+                                        # Pb 追蹤
                                         if target_key == "Pb":
                                             current_score = priority[0]
                                             current_val = priority[1]
-                                            
                                             if current_score > pb_tracker["max_score"]:
                                                 pb_tracker["max_score"] = current_score
                                                 pb_tracker["max_value"] = current_val
@@ -253,7 +282,6 @@ def process_files(files):
                                     if kw.lower() in item_name.lower():
                                         if group_key == "PFAS" and "pfos" in item_name.lower() and "related" not in item_name.lower():
                                             continue
-                                        
                                         file_group_data[group_key].append(priority)
                                         break
             
@@ -268,24 +296,21 @@ def process_files(files):
 
         except Exception as e:
             st.warning(f"檔案 {filename} 解析異常: {e}")
-
+        
         progress_bar.progress((i + 1) / len(files))
 
-    # 4. 聚合
+    # 聚合
     final_row = {}
-
     for key in OUTPUT_COLUMNS:
         if key in ["日期", "檔案名稱"]: continue
-        
         candidates = data_pool.get(key, [])
         if not candidates:
             final_row[key] = "" 
             continue
-            
         best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
         final_row[key] = best_record['priority'][2]
 
-    # 日期
+    # 日期與檔名
     final_date_str = ""
     latest_file = ""
     if all_dates:
@@ -303,9 +328,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v13.5", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v13.5)")
-st.info("💡 v13.5 最終修正：修復 SyntaxError，請全選覆蓋舊程式碼。")
+st.set_page_config(page_title="SGS 報告聚合工具 v14.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v14.0)")
+st.info("💡 v14.0 重大更新：加入黑名單機制，防止誤抓 Limit/MDL 欄位。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -315,7 +340,6 @@ if uploaded_files:
     try:
         result_data = process_files(uploaded_files)
         df = pd.DataFrame(result_data)
-        
         for col in OUTPUT_COLUMNS:
             if col not in df.columns: df[col] = ""
         df = df[OUTPUT_COLUMNS]
@@ -327,7 +351,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v13.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v14.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

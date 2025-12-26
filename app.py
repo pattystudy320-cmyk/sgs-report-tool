@@ -65,18 +65,18 @@ def clean_text(text):
 
 def extract_date_from_text(text):
     """
-    v16.0 修正：針對 CTI 格式 (Dec. 26, 2024) 進行強化
+    v17.0: 包含 CTI 格式 (Dec. 26, 2024)
     """
     text = clean_text(text)
     
     patterns = [
-        # 格式: 2023/03/03, 2023-03-03, 2023.03.03
+        # 2023/03/03
         r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])",
-        # 格式: 03-Mar-2023, 03-Jan-2025
+        # 03-Mar-2023
         r"(0?[1-9]|[12][0-9]|3[01])-[a-zA-Z]{3}-(20\d{2})",
-        # 格式: Mar 03, 2023, Oct 08, 2024 (Intertek)
+        # Mar 03, 2023
         r"([a-zA-Z]{3})\s+(0?[1-9]|[12][0-9]|3[01])[,]\s+(20\d{2})",
-        # 格式: Dec. 26, 2024 (CTI 特有格式)
+        # Dec. 26, 2024 (CTI)
         r"([a-zA-Z]{3})\.\s*(0?[1-9]|[12][0-9]|3[01])[,]\s+(20\d{2})"
     ]
     
@@ -86,34 +86,48 @@ def extract_date_from_text(text):
         for match in matches:
             try:
                 dt = None
-                groups = match.groups()
                 full_match = match.group(0)
+                clean_str = full_match.replace(".", "").replace(",", "")
                 
-                # 嘗試解析各種格式
-                try:
-                    # 針對 Dec. 26, 2024 移除點和逗號
-                    clean_date_str = full_match.replace(".", "").replace(",", "")
-                    # 嘗試各種時間格式
-                    for fmt in ["%Y/%m/%d", "%d-%b-%Y", "%b %d %Y"]:
-                        try:
-                            dt = datetime.strptime(clean_date_str.replace("-", "/").replace(".", "/"), fmt)
-                            break
-                        except: continue
-                except: pass
+                for fmt in ["%Y/%m/%d", "%d-%b-%Y", "%b %d %Y"]:
+                    try:
+                        dt = datetime.strptime(clean_str.replace("-", "/").replace(".", "/"), fmt)
+                        break
+                    except: continue
                 
-                # 年份過濾器 (排除 IEC 62321 等法規編號)
                 if dt and 2000 <= dt.year <= 2030: 
                     found_dates.append(dt)
             except: continue
             
     if found_dates:
-        return max(found_dates) # 回傳最新日期
+        return max(found_dates)
     return None
+
+def is_suspicious_limit_value(val):
+    """
+    ★ 數值防火牆 ★
+    判斷數值是否像 '限值' (1000, 100, 50, 25, 10, 5, 2)
+    如果是這些數字，且不含小數點(如1000.5)，則視為高風險，不予抓取。
+    除非它真的是檢測結果，但機率極低。
+    """
+    try:
+        n = float(val)
+        # 常見的 RoHS 限值與 MDL (整數)
+        suspicious_list = [1000.0, 100.0, 50.0, 25.0, 10.0, 8.0, 5.0, 2.0] 
+        # 注意: 8.0 是您的真實結果，不能擋。
+        # 所以我們只擋那些「這張表裡明顯是 Limit」的數字
+        # 為了安全，我們只擋 Limit 常見值
+        block_list = [1000.0, 100.0, 50.0] 
+        
+        if n in block_list:
+            return True
+        return False
+    except:
+        return False
 
 def parse_value_priority(value_str):
     raw_val = clean_text(value_str)
     
-    # 處理特殊格式: 0.01 (100) -> 切除括號後面的限值
     if "(" in raw_val:
         raw_val = raw_val.split("(")[0].strip()
         
@@ -122,9 +136,12 @@ def parse_value_priority(value_str):
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
-    # 排除清單 (黑名單)
-    if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "002", "no.1", "---", "-", "limits", "mg/kg", "ppm"]: 
+    if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits"]: 
         return (0, 0, "")
+
+    # ★ 啟動數值防火牆 ★
+    if is_suspicious_limit_value(val):
+        return (0, 0, "") # 忽略此數值
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: 
         return (1, 0, "n.d.")
@@ -140,7 +157,7 @@ def parse_value_priority(value_str):
             
     return (0, 0, val)
 
-# --- 3. 核心：智慧欄位識別 (黑名單機制) ---
+# --- 3. 核心：智慧欄位識別 ---
 
 def check_pfas_trigger(full_text):
     for phrase in PFAS_TRIGGER_PHRASES:
@@ -148,56 +165,61 @@ def check_pfas_trigger(full_text):
             return True
     return False
 
-def identify_columns(header_row):
+def identify_columns(table):
     """
-    回傳: item_idx, result_idx, is_limit_table(布林值)
+    v17.0: 掃描表格前 3 行來找標題
+    回傳: item_idx, result_idx, is_limit_table
     """
     item_idx = -1
     result_idx = -1
     is_limit_table = False
     
-    # 轉小寫方便比對
-    header_text_all = " ".join([str(c).lower() for c in header_row])
+    # 掃描前 3 行
+    max_scan_rows = min(3, len(table))
     
-    # ★ 限值表過濾 ★
-    # 如果標題包含 "restricted substances" 或 "limits" 且完全沒有 "result" 或 數字編號
-    if ("restricted substances" in header_text_all or "limits" in header_text_all or "rohs limit" in header_text_all) and \
-       not any(x in header_text_all for x in ["result", "結果", "001", "002", "003", "004", "no.1", "green"]):
-        return -1, -1, True # 標記為限值表
+    # 1. 先檢查這是不是限值表 (Limit Table)
+    full_header_text = ""
+    for r in range(max_scan_rows):
+        full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
+    
+    if ("restricted substances" in full_header_text or "limits" in full_header_text) and \
+       not any(x in full_header_text for x in ["result", "結果", "00", "no.", "green"]):
+        return -1, -1, True # 這是限值表，跳過
 
-    for i, cell in enumerate(header_row):
-        txt = clean_text(cell).lower()
-        if "test item" in txt or "tested item" in txt or "測試項目" in txt: item_idx = i
-        
-        # ★ v16.0 擴充結果欄位識別 ★
-        # 支援: Result, 結果, 001~009, No.1, Green material, Submitted samples
-        if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or "no.1" in txt or 
-            "green material" in txt or "submitted samples" in txt): 
-            result_idx = i
+    # 2. 尋找欄位索引
+    for r_idx in range(max_scan_rows):
+        row = table[r_idx]
+        for c_idx, cell in enumerate(row):
+            txt = clean_text(cell).lower()
+            if not txt: continue
             
+            # 測項
+            if "test item" in txt or "tested item" in txt or "測試項目" in txt:
+                if item_idx == -1: item_idx = c_idx
+            
+            # 結果 (關鍵字擴充)
+            # 包含: Result, 001~009, No.1, Green material, Submitted samples, Composite
+            if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
+                "no." in txt or "green" in txt or "submitted" in txt or "composite" in txt):
+                if result_idx == -1: result_idx = c_idx
+
     return item_idx, result_idx, False
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     all_dates = []
-    
-    pb_tracker = {
-        "max_score": -1, 
-        "max_value": -1.0,
-        "filenames": []
-    }
+    pb_tracker = {"max_score": -1, "max_value": -1.0, "filenames": []}
     
     progress_bar = st.progress(0)
     
     for i, file in enumerate(files):
         filename = file.name
-        
         file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
         full_text_content = ""
 
         try:
             with pdfplumber.open(file) as pdf:
-                # 1. 抓日期 (掃描前3頁)
+                # 日期
                 file_dates = []
                 for p_idx in range(min(3, len(pdf.pages))):
                     page_txt = pdf.pages[p_idx].extract_text()
@@ -205,17 +227,12 @@ def process_files(files):
                         full_text_content += page_txt
                         d = extract_date_from_text(page_txt)
                         if d: file_dates.append(d)
+                if file_dates: all_dates.append((max(file_dates), filename))
                 
-                # 抓取該檔案中最新的日期
-                if file_dates:
-                    all_dates.append((max(file_dates), filename))
-                
-                # 補讀文字
-                for p in pdf.pages[3:]:
-                    full_text_content += (p.extract_text() or "")
+                for p in pdf.pages[3:]: full_text_content += (p.extract_text() or "")
                 pfas_active = check_pfas_trigger(full_text_content)
 
-                # 2. 抓表格
+                # 表格
                 last_result_idx = -1 
                 last_item_idx = 0
 
@@ -224,14 +241,10 @@ def process_files(files):
                     for table in tables:
                         if not table or len(table) < 2: continue
                         
-                        header_row = table[0]
-                        item_idx, result_idx, is_limit_table = identify_columns(header_row)
+                        item_idx, result_idx, is_limit_table = identify_columns(table)
                         
-                        # ★ 如果是限值表，直接跳過這張表 ★
-                        if is_limit_table:
-                            continue
+                        if is_limit_table: continue # 跳過限值表
 
-                        # 表頭記憶 (處理跨頁表格)
                         if result_idx != -1:
                             last_result_idx = result_idx
                             last_item_idx = item_idx if item_idx != -1 else 0
@@ -243,8 +256,8 @@ def process_files(files):
                         for row_idx, row in enumerate(table):
                             clean_row = [clean_text(cell) for cell in row]
                             row_txt = "".join(clean_row).lower()
-                            # 跳過標題行
-                            if "test item" in row_txt or "result" in row_txt or "restricted substances" in row_txt: continue
+                            # 跳過標題
+                            if "test item" in row_txt or "result" in row_txt or "restricted" in row_txt: continue
                             if not any(clean_row): continue
                             
                             target_item_col = item_idx if item_idx != -1 else 0
@@ -252,28 +265,28 @@ def process_files(files):
                             item_name = clean_row[target_item_col]
                             
                             result = ""
+                            # A. 優先用定位
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
+                            # B. 備援：倒著找，但嚴格避開黑名單欄位 (Limit/MDL)
+                            # 這裡我們不方便知道哪一欄是 Limit，所以依賴 parse_value_priority 的數值防火牆
                             if not result:
-                                # 備援掃描 (倒著找)
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
                                     if not cell: continue
-                                    # 排除限值 1000, 100, 5, 2
                                     if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
                                         result = cell
                                         break
                                     if re.search(r"^\d+(\.\d+)?$", cell):
-                                        if float(cell) in [1000, 100, 50, 25, 10, 5, 2]:
-                                            continue
+                                        # 交給 parse_value_priority 判斷是否為 1000/100
                                         result = cell
                                         break
                             
                             priority = parse_value_priority(result)
                             if priority[0] == 0: continue 
 
-                            # A. Simple 項目 (含 Pb 追蹤)
+                            # Simple
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
@@ -288,7 +301,6 @@ def process_files(files):
                                         if target_key == "Pb":
                                             current_score = priority[0]
                                             current_val = priority[1]
-                                            
                                             if current_score > pb_tracker["max_score"]:
                                                 pb_tracker["max_score"] = current_score
                                                 pb_tracker["max_value"] = current_val
@@ -301,10 +313,9 @@ def process_files(files):
                                                     pb_tracker["filenames"].append(filename)
                                         break
 
-                            # B. Group 項目
+                            # Group
                             for group_key, keywords in GROUP_KEYWORDS.items():
                                 if group_key == "PFAS" and not pfas_active: continue
-
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
                                         if group_key == "PFAS" and "pfos" in item_name.lower() and "related" not in item_name.lower():
@@ -355,9 +366,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v16.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v16.0 全能版)")
-st.info("💡 v16.0：修正 CTI 日期格式、Intertek 欄位識別、支援 001~009 多樣化結果。")
+st.set_page_config(page_title="SGS 報告聚合工具 v17.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v17.0 最終修正版)")
+st.info("💡 v17.0：加入數值防火牆(阻擋1000/100限值)、多行表頭識別(解決Intertek換行標題)、支援CTI日期格式。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -378,7 +389,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v16.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v17.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

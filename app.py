@@ -65,20 +65,19 @@ def clean_text(text):
 
 def extract_date_from_text(text):
     """
-    修正後的日期抓取：
-    1. 限制年份必須是 20xx (避免抓到 IEC 62321)
-    2. 支援常見格式
+    v16.0 修正：針對 CTI 格式 (Dec. 26, 2024) 進行強化
     """
     text = clean_text(text)
     
-    # Regex 針對年份做限制 (20\d{2}) -> 2000~2099
     patterns = [
         # 格式: 2023/03/03, 2023-03-03, 2023.03.03
         r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])",
         # 格式: 03-Mar-2023, 03-Jan-2025
         r"(0?[1-9]|[12][0-9]|3[01])-[a-zA-Z]{3}-(20\d{2})",
-        # 格式: Mar 03, 2023, Oct 08, 2024
-        r"([a-zA-Z]{3})\s+(0?[1-9]|[12][0-9]|3[01])[,]\s+(20\d{2})"
+        # 格式: Mar 03, 2023, Oct 08, 2024 (Intertek)
+        r"([a-zA-Z]{3})\s+(0?[1-9]|[12][0-9]|3[01])[,]\s+(20\d{2})",
+        # 格式: Dec. 26, 2024 (CTI 特有格式)
+        r"([a-zA-Z]{3})\.\s*(0?[1-9]|[12][0-9]|3[01])[,]\s+(20\d{2})"
     ]
     
     found_dates = []
@@ -92,20 +91,17 @@ def extract_date_from_text(text):
                 
                 # 嘗試解析各種格式
                 try:
-                    dt = datetime.strptime(full_match.replace(".", "/").replace("-", "/"), "%Y/%m/%d")
-                except:
-                    try:
-                        dt = datetime.strptime(full_match, "%d-%b-%Y")
-                    except:
+                    # 針對 Dec. 26, 2024 移除點和逗號
+                    clean_date_str = full_match.replace(".", "").replace(",", "")
+                    # 嘗試各種時間格式
+                    for fmt in ["%Y/%m/%d", "%d-%b-%Y", "%b %d %Y"]:
                         try:
-                            # 處理 "Oct 08, 2024" 這種格式
-                            # 移除逗號以便解析
-                            clean_date = full_match.replace(",", "")
-                            dt = datetime.strptime(clean_date, "%b %d %Y")
-                        except:
-                            pass
+                            dt = datetime.strptime(clean_date_str.replace("-", "/").replace(".", "/"), fmt)
+                            break
+                        except: continue
+                except: pass
                 
-                # ★ 關鍵：年份過濾器 (排除 IEC 62321) ★
+                # 年份過濾器 (排除 IEC 62321 等法規編號)
                 if dt and 2000 <= dt.year <= 2030: 
                     found_dates.append(dt)
             except: continue
@@ -163,19 +159,20 @@ def identify_columns(header_row):
     # 轉小寫方便比對
     header_text_all = " ".join([str(c).lower() for c in header_row])
     
-    # ★ 關鍵修正：偵測這是「限值表」嗎？
+    # ★ 限值表過濾 ★
     # 如果標題包含 "restricted substances" 或 "limits" 且完全沒有 "result" 或 數字編號
-    # Intertek/CTI 的限值表通常長這樣
     if ("restricted substances" in header_text_all or "limits" in header_text_all or "rohs limit" in header_text_all) and \
-       not any(x in header_text_all for x in ["result", "結果", "001", "002", "003", "004", "no.1"]):
-        return -1, -1, True # 標記為限值表，稍後跳過
+       not any(x in header_text_all for x in ["result", "結果", "001", "002", "003", "004", "no.1", "green"]):
+        return -1, -1, True # 標記為限值表
 
     for i, cell in enumerate(header_row):
         txt = clean_text(cell).lower()
         if "test item" in txt or "tested item" in txt or "測試項目" in txt: item_idx = i
         
-        # 支援多種結果欄位寫法: Result, 結果, 001~009, No.1, Green material
-        if "result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or "no.1" in txt or "green material" in txt: 
+        # ★ v16.0 擴充結果欄位識別 ★
+        # 支援: Result, 結果, 001~009, No.1, Green material, Submitted samples
+        if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or "no.1" in txt or 
+            "green material" in txt or "submitted samples" in txt): 
             result_idx = i
             
     return item_idx, result_idx, False
@@ -259,19 +256,15 @@ def process_files(files):
                                 result = clean_row[result_idx]
                             
                             if not result:
-                                # 備援掃描 (倒著找，但避開明顯是限值的數字)
+                                # 備援掃描 (倒著找)
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
                                     if not cell: continue
-                                    # 排除 Limit 1000, 100, 5, 2 (MDL)
-                                    # 這裡做一個簡單過濾：如果是純整數且是 1000, 100, 50 這種常見限值，且這一列前面還有其他數字，則可能是限值
-                                    # 為求保險，優先找 nd 或 negative
+                                    # 排除限值 1000, 100, 5, 2
                                     if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
                                         result = cell
                                         break
-                                    # 如果是數字
                                     if re.search(r"^\d+(\.\d+)?$", cell):
-                                        # 簡單判斷：如果這個數字是 1000, 100，很可能是限值，先不抓，除非沒別的選擇
                                         if float(cell) in [1000, 100, 50, 25, 10, 5, 2]:
                                             continue
                                         result = cell
@@ -362,9 +355,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v15.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v15.0)")
-st.info("💡 v15.0：修正日期誤判、自動過濾 RoHS Limit 限值表、支援 CTI/Intertek 多種格式。")
+st.set_page_config(page_title="SGS 報告聚合工具 v16.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v16.0 全能版)")
+st.info("💡 v16.0：修正 CTI 日期格式、Intertek 欄位識別、支援 001~009 多樣化結果。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -385,7 +378,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v15.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v16.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

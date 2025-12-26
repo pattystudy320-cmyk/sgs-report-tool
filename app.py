@@ -25,16 +25,14 @@ SIMPLE_KEYWORDS = {
 
 GROUP_KEYWORDS = {
     "PBB": [
-        "Polybrominated Biphenyls (PBBs)",
-        "Sum of PBBs", "多溴聯苯總和", "PBBs",
+        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和",
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
         "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
         "Decabromobiphenyl", "bromobiphenyl"
     ],
     "PBDE": [
-        "Polybrominated Diphenyl Ethers (PBDEs)",
-        "Sum of PBDEs", "多溴聯苯醚總和", "PBDEs",
+        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和",
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
@@ -87,7 +85,6 @@ def extract_date_from_text(text):
 def parse_value_priority(value_str):
     raw_val = clean_text(value_str)
     
-    # 處理特殊格式: 0.01 (100) -> 取 0.01
     if "(" in raw_val:
         raw_val = raw_val.split("(")[0].strip()
         
@@ -96,9 +93,11 @@ def parse_value_priority(value_str):
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
+    # 排除清單加入 "001", "004", "no.1"
     if val_lower in ["result", "limit", "mdl", "loq", "unit", "method", "004", "001", "no.1", "---", "-"]: 
         return (0, 0, "")
 
+    # 強制統一 N.D. 格式
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: 
         return (1, 0, "n.d.")
     if "negative" in val_lower or "陰性" in val_lower: 
@@ -113,7 +112,7 @@ def parse_value_priority(value_str):
             
     return (0, 0, val)
 
-# --- 3. 核心：動態欄位識別 ---
+# --- 3. 核心邏輯 ---
 
 def check_pfas_trigger(full_text):
     for phrase in PFAS_TRIGGER_PHRASES:
@@ -128,6 +127,8 @@ def identify_columns(header_row):
     for i, cell in enumerate(header_row):
         txt = clean_text(cell).lower()
         if "test item" in txt or "tested item" in txt or "測試項目" in txt: item_idx = i
+        
+        # 增加 001, 004, No.1 的判斷
         if "result" in txt or "結果" in txt or "001" in txt or "004" in txt or "no.1" in txt: 
             result_idx = i
             
@@ -153,7 +154,7 @@ def process_files(files):
 
         try:
             with pdfplumber.open(file) as pdf:
-                # 1. 抓日期
+                # 抓日期
                 date_found = None
                 for p_idx in range(min(3, len(pdf.pages))):
                     page_txt = pdf.pages[p_idx].extract_text()
@@ -171,7 +172,7 @@ def process_files(files):
 
                 pfas_active = check_pfas_trigger(full_text_content)
 
-                # 2. 抓表格
+                # 抓表格
                 last_result_idx = -1 
                 last_item_idx = 0
 
@@ -216,7 +217,7 @@ def process_files(files):
                             priority = parse_value_priority(result)
                             if priority[0] == 0: continue 
 
-                            # --- A. Simple (含 Pb 追蹤) ---
+                            # Simple 項目
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
@@ -236,17 +237,15 @@ def process_files(files):
                                                 pb_tracker["max_score"] = current_score
                                                 pb_tracker["max_value"] = current_val
                                                 pb_tracker["filenames"] = [filename]
-                                            
                                             elif current_score == 3 and current_val > pb_tracker["max_value"]:
                                                 pb_tracker["max_value"] = current_val
                                                 pb_tracker["filenames"] = [filename]
-                                            
                                             elif current_score == 3 and current_val == pb_tracker["max_value"]:
                                                 if filename not in pb_tracker["filenames"]:
                                                     pb_tracker["filenames"].append(filename)
                                         break
 
-                            # --- B. Group ---
+                            # Group 項目
                             for group_key, keywords in GROUP_KEYWORDS.items():
                                 if group_key == "PFAS" and not pfas_active: continue
 
@@ -258,7 +257,7 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
             
-            # --- 檔案結算 ---
+            # 檔案結算
             for group_key, values in file_group_data.items():
                 if values:
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
@@ -272,4 +271,63 @@ def process_files(files):
 
         progress_bar.progress((i + 1) / len(files))
 
-    # --- 4.
+    # 4. 聚合
+    final_row = {}
+
+    for key in OUTPUT_COLUMNS:
+        if key in ["日期", "檔案名稱"]: continue
+        
+        candidates = data_pool.get(key, [])
+        if not candidates:
+            final_row[key] = "" 
+            continue
+            
+        best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
+        final_row[key] = best_record['priority'][2]
+
+    # 日期
+    final_date_str = ""
+    latest_file = ""
+    if all_dates:
+        latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
+        final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
+        latest_file = latest_date_record[1]
+    
+    final_row["日期"] = final_date_str
+    
+    if pb_tracker["filenames"]:
+        final_row["檔案名稱"] = ", ".join(pb_tracker["filenames"])
+    else:
+        final_row["檔案名稱"] = latest_file if latest_file else (files[0].name if files else "")
+
+    return [final_row]
+
+# --- 介面 ---
+st.set_page_config(page_title="SGS 報告聚合工具 v13.5", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v13.5)")
+st.info("💡 v13.5 最終修正：修復 SyntaxError，請全選覆蓋舊程式碼。")
+
+uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
+
+if uploaded_files:
+    if st.button("🔄 重新執行"): st.rerun()
+
+    try:
+        result_data = process_files(uploaded_files)
+        df = pd.DataFrame(result_data)
+        
+        for col in OUTPUT_COLUMNS:
+            if col not in df.columns: df[col] = ""
+        df = df[OUTPUT_COLUMNS]
+
+        st.success("✅ 處理完成！")
+        st.dataframe(df)
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Summary')
+        
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v13.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        
+    except Exception as e:
+        st.error(f"系統錯誤: {e}")

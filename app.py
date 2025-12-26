@@ -201,7 +201,7 @@ uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf"
 if uploaded_files:
     # 重新整理按鈕 (解決有時需要重跑的需求)
     if st.button("🔄 重新執行分析"):
-        st.experimental_rerun()
+        st.rerun()
 
     try:
         result_data = process_files(uploaded_files)
@@ -228,4 +228,5 @@ if uploaded_files:
         )
         
     except Exception as e:
+
         st.error(f"發生錯誤: {e}")

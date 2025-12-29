@@ -17,11 +17,11 @@ SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    # ★ v25.0 修正：擴充 PFOS 關鍵字，包含 sulfonic acid ★
+    # ★ v29.0 修正：補上 sulfonic acid 以抓取 SGS Overcoat 報告
     "PFOS": [
         "Perfluorooctane sulfonates", 
         "Perfluorooctane sulfonate", 
-        "Perfluorooctane sulfonic acid", # 新增
+        "Perfluorooctane sulfonic acid", 
         "全氟辛烷磺酸"
     ], 
     "F": ["Fluorine", "氟"],
@@ -58,7 +58,7 @@ GROUP_KEYWORDS = {
     ]
 }
 
-# PFAS 摘要檢查關鍵字
+# PFAS 摘要檢查關鍵字 (v24 邏輯：嚴格匹配)
 PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances",
     "PFAS",
@@ -140,7 +140,7 @@ def parse_value_priority(value_str):
             
     return (0, 0, val)
 
-# --- 3. 核心：智慧欄位識別 ---
+# --- 3. 核心：智慧欄位識別 (回歸 v24 邏輯並增強) ---
 
 def check_pfas_in_summary(text):
     txt_lower = text.lower()
@@ -150,18 +150,15 @@ def check_pfas_in_summary(text):
 
 def identify_columns(table):
     """
-    v25.0: 增加推斷邏輯，解決 'A16' 這類非標準結果欄位名稱
+    v29.0: 基於 v24 邏輯，但增加對 A16 等樣品編號的支援。
+    不再主動跳過含有 Limit 的表格，改用數值防火牆過濾。
     """
     item_idx = -1
     result_idx = -1
-    mdl_idx = -1 # 偵測極限欄位索引
     
+    # 掃描前 3 行 (SGS 大標題可能佔用第一行)
     max_scan_rows = min(3, len(table))
-    full_header_text = ""
-    for r in range(max_scan_rows):
-        full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    # 1. 識別欄位 (Item, Result, MDL)
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
         for c_idx, cell in enumerate(row):
@@ -171,31 +168,15 @@ def identify_columns(table):
             if "test item" in txt or "tested item" in txt or "測試項目" in txt:
                 if item_idx == -1: item_idx = c_idx
             
-            # 尋找 MDL 欄位
-            if "mdl" in txt or "loq" in txt:
-                if mdl_idx == -1: mdl_idx = c_idx
-
-            # 尋找明確的 Result 欄位
+            # 結果欄位識別：Result, 結果, 001~009, A1~A99, No.1, Green
+            # ★ v29.0: 加入 re.search(r"^a\d+$", txt) 支援 A16
             if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
-                "no." in txt or "green" in txt or "submitted" in txt or "composite" in txt):
+                re.search(r"^a\s*[-]?\s*\d+", txt) or "no." in txt or 
+                "green" in txt or "submitted" in txt or "composite" in txt):
                 if "cas" not in txt:
                     if result_idx == -1: result_idx = c_idx
-    
-    # ★ v25.0 關鍵修正：如果沒找到 Result，但找到了 MDL，大膽推測 MDL 右邊就是 Result ★
-    if result_idx == -1 and mdl_idx != -1:
-        # 檢查 MDL 的下一欄是否存在
-        if mdl_idx + 1 < len(table[0]):
-            result_idx = mdl_idx + 1
 
-    # 2. 判斷是否為參考表
-    # 如果還是找不到 Result (連推斷都失敗)，才檢查是否為 Limit/Reference 表並跳過
-    is_reference_table = False
-    if result_idx == -1: 
-        if ("restricted substances" in full_header_text or "limits" in full_header_text or 
-            "group name" in full_header_text or "substance name" in full_header_text):
-            is_reference_table = True
-
-    return item_idx, result_idx, is_reference_table
+    return item_idx, result_idx
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
@@ -235,9 +216,14 @@ def process_files(files):
                     for table in tables:
                         if not table or len(table) < 2: continue
                         
-                        item_idx, result_idx, is_skip_table = identify_columns(table)
+                        item_idx, result_idx = identify_columns(table)
                         
-                        if is_skip_table: continue 
+                        # 簡單過濾：如果標題有 "Restricted Substances" 或 "Limits" 且完全沒找到結果欄，才跳過
+                        # v24 是沒有這個過濾的，但為了防止抓錯，我們只在確定沒找到結果欄時才跳
+                        if result_idx == -1:
+                            header_txt = " ".join([str(c).lower() for c in table[0] if c])
+                            if "restricted substances" in header_txt or "limits" in header_txt:
+                                continue
 
                         if result_idx != -1:
                             last_result_idx = result_idx
@@ -350,9 +336,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v25.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v25.0)")
-st.info("💡 v25.0：修正 SGS Overcoat 報告之 PFOS 漏抓問題，新增 A16/Sample ID 智慧欄位推斷。")
+st.set_page_config(page_title="SGS 報告聚合工具 v29.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v29.0 回歸穩定版)")
+st.info("💡 v29.0：基於 v24 架構修正，補上 PFOS 關鍵字與 A16 欄位支援，確保所有欄位恢復正常抓取。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -373,7 +359,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v25.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v29.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

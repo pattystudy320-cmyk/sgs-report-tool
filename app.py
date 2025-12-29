@@ -144,7 +144,8 @@ def check_pfas_in_summary(text):
 
 def identify_columns(table):
     """
-    v26.0: 支援 SGS "A+數字" (例如 A16) 格式
+    v27.0: 修復 SGS 主表格被誤判為限值表的問題
+    策略：只要看到 'MDL' 或 'Unit'，就認定為有效表格，絕不跳過。
     """
     item_idx = -1
     result_idx = -1
@@ -152,9 +153,14 @@ def identify_columns(table):
     
     max_scan_rows = min(3, len(table))
     full_header_text = ""
+    has_mdl_or_unit = False # 關鍵標記
+
     for r in range(max_scan_rows):
-        full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
-    
+        row_text = " ".join([str(c).lower() for c in table[r] if c])
+        full_header_text += row_text + " "
+        if "mdl" in row_text or "unit" in row_text or "loq" in row_text:
+            has_mdl_or_unit = True
+
     # 1. 識別欄位
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
@@ -168,25 +174,27 @@ def identify_columns(table):
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
 
-            # 尋找 Result 欄位 (包含 A+數字, 001~009, Green material)
-            # 正則: ^a\d+$ 匹配 A1, A16, A99 等
+            # 尋找 Result 欄位
+            # v27: 放寬 A+數字 的正則，支援 "A 16", "A-16"
             if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
-                re.search(r"^a\d+$", txt) or "no." in txt or 
+                re.search(r"a\s*[-]?\s*\d+", txt) or "no." in txt or 
                 "green" in txt or "submitted" in txt or "composite" in txt):
                 if "cas" not in txt:
                     if result_idx == -1: result_idx = c_idx
     
-    # 2. 備援：若找不到 Result 但有 MDL，取 MDL 右邊
+    # 2. 備援：若找不到 Result 但有 MDL，強制鎖定 MDL 右邊
     if result_idx == -1 and mdl_idx != -1:
         if mdl_idx + 1 < len(table[0]):
             result_idx = mdl_idx + 1
 
-    # 3. 參考表過濾
+    # 3. 參考表過濾 (Fix: 只要有 MDL/Unit 就不跳過)
     is_reference_table = False
     if result_idx == -1: 
-        if ("restricted substances" in full_header_text or "limits" in full_header_text or 
-            "group name" in full_header_text or "substance name" in full_header_text):
-            is_reference_table = True
+        # 如果標題像限值表，且沒有 MDL/Unit，才跳過
+        if not has_mdl_or_unit:
+            if ("restricted substances" in full_header_text or "limits" in full_header_text or 
+                "group name" in full_header_text or "substance name" in full_header_text):
+                is_reference_table = True
 
     return item_idx, result_idx, is_reference_table
 
@@ -206,6 +214,7 @@ def process_files(files):
                 file_dates = []
                 first_few_pages_text = ""
                 
+                # 1. 日期 & PFAS
                 for p_idx in range(min(2, len(pdf.pages))):
                     page_txt = pdf.pages[p_idx].extract_text()
                     if page_txt:
@@ -230,6 +239,7 @@ def process_files(files):
                         
                         if is_skip_table: continue 
 
+                        # 表頭記憶
                         if result_idx != -1:
                             last_result_idx = result_idx
                             last_item_idx = item_idx if item_idx != -1 else 0
@@ -251,9 +261,11 @@ def process_files(files):
                             if "pvc" in item_name.lower() or "polyvinyl" in item_name.lower(): continue
 
                             result = ""
+                            # A. 優先用定位
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
+                            # B. 備援
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -341,9 +353,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v26.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v26.0)")
-st.info("💡 v26.0：新增 SGS 'A+數字' (如 A16) 欄位識別，搭配 MDL 自動推斷，確保 PFOS 與其他數值精準抓取。")
+st.set_page_config(page_title="SGS 報告聚合工具 v27.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v27.0 最終修正)")
+st.info("💡 v27.0：修復 SGS 主表格被誤判為限值表的問題，確保 A16/A+數字 格式的報告能正確抓取。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -364,7 +376,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v26.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v27.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

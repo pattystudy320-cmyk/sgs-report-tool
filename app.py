@@ -17,7 +17,7 @@ SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    "PFOS": ["Perfluorooctane sulfonates", "全氟辛烷磺酸", "Perfluorooctane sulfonate"], 
+    "PFOS": ["Perfluorooctane sulfonates", "全氟辛烷磺酸", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid"], 
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
@@ -52,14 +52,12 @@ GROUP_KEYWORDS = {
     ]
 }
 
-# ★ v24.0 修正：嚴格限縮 PFAS 觸發字，排除 PFOA/PFOS ★
-# 只有出現這些「總稱」時，才判定為有測 PFAS
+# PFAS 摘要檢查關鍵字
 PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances",
     "PFAS",
     "全氟/多氟烷基物質",
-    "全氟烷基物質",
-    # 注意：移除了 "Perfluoro" 和 "PFOA"，避免誤判單測 PFOA 的報告
+    "全氟烷基物質"
 ]
 
 OUTPUT_COLUMNS = [
@@ -139,27 +137,25 @@ def parse_value_priority(value_str):
 # --- 3. 核心：智慧欄位識別 ---
 
 def check_pfas_in_summary(text):
-    """
-    v24.0: 嚴格檢查，排除 PFOA/PFOS 關鍵字，只抓廣泛的 PFAS 聲明
-    """
     txt_lower = text.lower()
     for kw in PFAS_SUMMARY_KEYWORDS:
-        # 使用正則表達式進行完整單字匹配，避免 "PFAS" 匹配到其他單字的一部分
-        # 但對於 "Per- and ..." 這種長句，直接用字串包含
-        if kw.lower() in txt_lower:
-            return True
+        if kw.lower() in txt_lower: return True
     return False
 
 def identify_columns(table):
+    """
+    v26.0: 支援 SGS "A+數字" (例如 A16) 格式
+    """
     item_idx = -1
     result_idx = -1
+    mdl_idx = -1 
     
     max_scan_rows = min(3, len(table))
     full_header_text = ""
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    # 1. 識別結果欄位
+    # 1. 識別欄位
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
         for c_idx, cell in enumerate(row):
@@ -169,13 +165,23 @@ def identify_columns(table):
             if "test item" in txt or "tested item" in txt or "測試項目" in txt:
                 if item_idx == -1: item_idx = c_idx
             
-            # 結果欄位關鍵字
+            if "mdl" in txt or "loq" in txt:
+                if mdl_idx == -1: mdl_idx = c_idx
+
+            # 尋找 Result 欄位 (包含 A+數字, 001~009, Green material)
+            # 正則: ^a\d+$ 匹配 A1, A16, A99 等
             if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
-                "no." in txt or "green" in txt or "submitted" in txt or "composite" in txt):
+                re.search(r"^a\d+$", txt) or "no." in txt or 
+                "green" in txt or "submitted" in txt or "composite" in txt):
                 if "cas" not in txt:
                     if result_idx == -1: result_idx = c_idx
+    
+    # 2. 備援：若找不到 Result 但有 MDL，取 MDL 右邊
+    if result_idx == -1 and mdl_idx != -1:
+        if mdl_idx + 1 < len(table[0]):
+            result_idx = mdl_idx + 1
 
-    # 2. 判斷是否為參考表 (只有在找不到結果欄時才嚴格跳過)
+    # 3. 參考表過濾
     is_reference_table = False
     if result_idx == -1: 
         if ("restricted substances" in full_header_text or "limits" in full_header_text or 
@@ -200,7 +206,6 @@ def process_files(files):
                 file_dates = []
                 first_few_pages_text = ""
                 
-                # 1. 日期 & PFAS
                 for p_idx in range(min(2, len(pdf.pages))):
                     page_txt = pdf.pages[p_idx].extract_text()
                     if page_txt:
@@ -213,7 +218,6 @@ def process_files(files):
                 if check_pfas_in_summary(first_few_pages_text):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
-                # 2. 表格掃描
                 last_result_idx = -1 
                 last_item_idx = 0
 
@@ -226,7 +230,6 @@ def process_files(files):
                         
                         if is_skip_table: continue 
 
-                        # 表頭記憶
                         if result_idx != -1:
                             last_result_idx = result_idx
                             last_item_idx = item_idx if item_idx != -1 else 0
@@ -338,9 +341,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v24.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v24.0)")
-st.info("💡 v24.0：嚴格定義 PFAS 觸發條件，避免將 PFOA/PFOS 單測報告誤判為全項 PFAS。")
+st.set_page_config(page_title="SGS 報告聚合工具 v26.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v26.0)")
+st.info("💡 v26.0：新增 SGS 'A+數字' (如 A16) 欄位識別，搭配 MDL 自動推斷，確保 PFOS 與其他數值精準抓取。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -361,7 +364,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v24.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v26.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

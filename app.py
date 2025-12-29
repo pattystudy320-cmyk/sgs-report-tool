@@ -7,6 +7,7 @@ from datetime import datetime
 
 # --- 1. 定義欄位與關鍵字 ---
 
+# 抓數值的項目
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
@@ -16,13 +17,20 @@ SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    "PFOS": ["Perfluorooctane sulfonates", "全氟辛烷磺酸", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid"], 
+    # ★ v25.0 修正：擴充 PFOS 關鍵字，包含 sulfonic acid ★
+    "PFOS": [
+        "Perfluorooctane sulfonates", 
+        "Perfluorooctane sulfonate", 
+        "Perfluorooctane sulfonic acid", # 新增
+        "全氟辛烷磺酸"
+    ], 
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
     "I": ["Iodine", "碘"]
 }
 
+# 抓群組最大值的項目
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和",
@@ -50,6 +58,7 @@ GROUP_KEYWORDS = {
     ]
 }
 
+# PFAS 摘要檢查關鍵字
 PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances",
     "PFAS",
@@ -141,76 +150,52 @@ def check_pfas_in_summary(text):
 
 def identify_columns(table):
     """
-    v28.0: 強制要求 'Test Item' 和 'Result/MDL' 必須在同一行，
-    避免誤抓 'Test Result(s):' 這種大標題行。
+    v25.0: 增加推斷邏輯，解決 'A16' 這類非標準結果欄位名稱
     """
+    item_idx = -1
+    result_idx = -1
+    mdl_idx = -1 # 偵測極限欄位索引
     
     max_scan_rows = min(3, len(table))
-    
-    # 先做全表頭檢查，看看是否為限值表
     full_header_text = ""
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    is_reference_table = False
-    if ("restricted substances" in full_header_text or "limits" in full_header_text or 
-        "group name" in full_header_text or "substance name" in full_header_text) and \
-       not any(x in full_header_text for x in ["00", "no.", "green"]): # Result 關鍵字可能會誤判，這裡用更具體的
-        # 注意：這裡不把 "result" 當作豁免關鍵字，因為限值表有時也會寫 "Test Item / Limit"
-        # 只有當出現具體樣品編號時才視為真表格
-        if "result" not in full_header_text: # 如果連 Result 都沒有，肯定是廢表
-            is_reference_table = True
-
-    # 逐行尋找「最佳」表頭列
-    # 最佳定義：同時包含 (Item) 和 (Result 或 MDL)
-    best_item_idx = -1
-    best_result_idx = -1
-    
+    # 1. 識別欄位 (Item, Result, MDL)
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
-        current_item_idx = -1
-        current_result_idx = -1
-        current_mdl_idx = -1
-        
         for c_idx, cell in enumerate(row):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # 1. 找測項欄
             if "test item" in txt or "tested item" in txt or "測試項目" in txt:
-                current_item_idx = c_idx
+                if item_idx == -1: item_idx = c_idx
             
-            # 2. 找 MDL 欄
+            # 尋找 MDL 欄位
             if "mdl" in txt or "loq" in txt:
-                current_mdl_idx = c_idx
+                if mdl_idx == -1: mdl_idx = c_idx
 
-            # 3. 找結果欄
-            # 排除 "Test Result(s)" 這種只有標題沒有內容的
-            # 嚴格匹配 A16, 001, No.1, Green
-            if (re.search(r"00[1-9]", txt) or re.search(r"a\s*[-]?\s*\d+", txt) or 
+            # 尋找明確的 Result 欄位
+            if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
                 "no." in txt or "green" in txt or "submitted" in txt or "composite" in txt):
                 if "cas" not in txt:
-                    current_result_idx = c_idx
-            
-            # 寬鬆匹配 Result (只有當還沒找到更好的時)
-            if current_result_idx == -1 and ("result" in txt or "結果" in txt):
-                 # 這裡要小心 "Test Result(s):" 這種整行只有一個 cell 的狀況
-                 # 通常表頭會有多個欄位
-                 if len([c for c in row if c]) > 1: # 確保這行不是單一標題行
-                     current_result_idx = c_idx
+                    if result_idx == -1: result_idx = c_idx
+    
+    # ★ v25.0 關鍵修正：如果沒找到 Result，但找到了 MDL，大膽推測 MDL 右邊就是 Result ★
+    if result_idx == -1 and mdl_idx != -1:
+        # 檢查 MDL 的下一欄是否存在
+        if mdl_idx + 1 < len(table[0]):
+            result_idx = mdl_idx + 1
 
-        # 判定這一行是否為有效表頭
-        # 條件：必須找到 Item，且 (找到 Result 或 找到 MDL)
-        if current_item_idx != -1:
-            if current_result_idx != -1:
-                # 完美匹配
-                return current_item_idx, current_result_idx, False
-            elif current_mdl_idx != -1:
-                # 備援：用 MDL 推斷 (MDL 右邊)
-                if current_mdl_idx + 1 < len(row):
-                    return current_item_idx, current_mdl_idx + 1, False
+    # 2. 判斷是否為參考表
+    # 如果還是找不到 Result (連推斷都失敗)，才檢查是否為 Limit/Reference 表並跳過
+    is_reference_table = False
+    if result_idx == -1: 
+        if ("restricted substances" in full_header_text or "limits" in full_header_text or 
+            "group name" in full_header_text or "substance name" in full_header_text):
+            is_reference_table = True
 
-    return -1, -1, is_reference_table
+    return item_idx, result_idx, is_reference_table
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
@@ -365,9 +350,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v28.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v28.0 最終極版)")
-st.info("💡 v28.0：修復標題列誤判，強制要求 Item 與 Result 在同一行，解決 SGS 大標題干擾問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v25.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v25.0)")
+st.info("💡 v25.0：修正 SGS Overcoat 報告之 PFOS 漏抓問題，新增 A16/Sample ID 智慧欄位推斷。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -388,7 +373,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v28.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v25.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

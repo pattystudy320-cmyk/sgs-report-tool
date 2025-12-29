@@ -1,22 +1,3 @@
-這確實非常奇怪，但根據您的描述和報告特性（A16、Limit、MDL 同時存在），我推測出最有可能的「致命傷」：
-
-**問題分析：**
-在上一版程式中，我設定了「如果標題有 Limit 且找不到 Result 欄位，就當作參考表跳過」。
-
-1. **A16 識別失敗**：可能因為 PDF 提取時 "A16" 帶有特殊格式，導致程式第一時間沒認出它是結果欄。
-2. **MDL 沒救到**：雖然有 MDL，但可能欄位索引計算有誤，導致沒能自動鎖定右邊。
-3. **誤殺主角**：程式看到表頭有 "Limit"（SGS 報告確實有），又誤以為沒找到結果欄，於是觸發了「跳過機制」，直接把整張檢測數據表當作廢表丟掉了。
-
-**v31.0 解決方案（白名單豁免機制）：**
-我修改了最底層的判斷邏輯：
-**「只要表格裡出現 'MDL'、'LOQ' 或 'Unit'，這張表就擁有『免死金牌』。」**
-不管程式有沒有找到 Result 欄位，也不管表頭有沒有 Limit，**只要有 MDL，絕對不准跳過這張表！**
-
-這樣一來，程式就會強迫進入數據列。接著，透過內建的**「備援掃描（倒著找數據）」**功能，它一定能抓到 "9"、"ND" 這些數值，因為它們不是 1000/100 這種被擋掉的限值。
-
-請將 `app.py` **全部清空**，貼上這段 **v31.0 最終豁免版**：
-
-```python
 import streamlit as st
 import pdfplumber
 import pandas as pd
@@ -26,6 +7,7 @@ from datetime import datetime
 
 # --- 1. 定義欄位與關鍵字 ---
 
+# 抓數值的項目
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
@@ -35,13 +17,20 @@ SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    "PFOS": ["Perfluorooctane sulfonates", "全氟辛烷磺酸", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid"], 
+    # 擴充 PFOS 關鍵字，確保抓到 SGS 的寫法
+    "PFOS": [
+        "Perfluorooctane sulfonates", 
+        "Perfluorooctane sulfonate", 
+        "Perfluorooctane sulfonic acid", 
+        "全氟辛烷磺酸"
+    ], 
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
     "I": ["Iodine", "碘"]
 }
 
+# 抓群組最大值的項目
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和",
@@ -69,6 +58,7 @@ GROUP_KEYWORDS = {
     ]
 }
 
+# PFAS 摘要檢查關鍵字
 PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances",
     "PFAS",
@@ -132,6 +122,7 @@ def parse_value_priority(value_str):
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
+    # 排除清單
     if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits"]: 
         return (0, 0, "")
 
@@ -160,8 +151,7 @@ def check_pfas_in_summary(text):
 
 def identify_columns(table):
     """
-    v31.0: 終極豁免邏輯
-    策略：只要表頭包含 'MDL', 'LOQ', 'Unit'，這張表就是主檢測表，絕對不跳過！
+    v30.0: 增加 A16 識別 + MDL 強制推斷機制
     """
     item_idx = -1
     result_idx = -1
@@ -169,14 +159,9 @@ def identify_columns(table):
     
     max_scan_rows = min(3, len(table))
     full_header_text = ""
-    has_mdl_or_unit = False # ★ 關鍵標記：這張表是否包含技術參數 (MDL/Unit)
-
     for r in range(max_scan_rows):
-        row_text = " ".join([str(c).lower() for c in table[r] if c])
-        full_header_text += row_text + " "
-        if "mdl" in row_text or "loq" in row_text or "unit" in row_text:
-            has_mdl_or_unit = True
-
+        full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
+    
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
         for c_idx, cell in enumerate(row):
@@ -190,26 +175,24 @@ def identify_columns(table):
                 if mdl_idx == -1: mdl_idx = c_idx
 
             # 結果欄位識別
+            # ★ 新增：re.search(r"^[a-z]\s*\d+$", txt) 用來抓 A16, B01 這類樣品編號
             if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
-                re.search(r"^[a-z]\s*[-]?\s*\d+", txt) or "no." in txt or 
+                re.search(r"^[a-z]\s*\d+$", txt) or "no." in txt or 
                 "green" in txt or "submitted" in txt or "composite" in txt):
                 if "cas" not in txt and "method" not in txt:
                     if result_idx == -1: result_idx = c_idx
     
-    # 救命機制：用 MDL 推斷
+    # ★ 救命機制：如果沒找到 Result，但找到了 MDL，大膽假設 MDL 右邊就是結果 ★
     if result_idx == -1 and mdl_idx != -1:
         if mdl_idx + 1 < len(table[0]):
             result_idx = mdl_idx + 1
 
-    # ★ v31.0 關鍵：如果這張表有 MDL/Unit，它就絕對不是單純的參考表，強制設為 False ★
+    # 參考表過濾：只有在「完全找不到結果欄 (連 MDL 推斷都失敗)」時，才執行限值表過濾
     is_reference_table = False
-    
     if result_idx == -1: 
-        # 只有在「沒有 MDL」且「標題看起來像限值表」時，才跳過
-        if not has_mdl_or_unit:
-            if ("restricted substances" in full_header_text or "limits" in full_header_text or 
-                "group name" in full_header_text or "substance name" in full_header_text):
-                is_reference_table = True
+        if ("restricted substances" in full_header_text or "limits" in full_header_text or 
+            "group name" in full_header_text or "substance name" in full_header_text):
+            is_reference_table = True
 
     return item_idx, result_idx, is_reference_table
 
@@ -229,6 +212,7 @@ def process_files(files):
                 file_dates = []
                 first_few_pages_text = ""
                 
+                # 1. 日期 & PFAS
                 for p_idx in range(min(2, len(pdf.pages))):
                     page_txt = pdf.pages[p_idx].extract_text()
                     if page_txt:
@@ -241,6 +225,7 @@ def process_files(files):
                 if check_pfas_in_summary(first_few_pages_text):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
+                # 2. 表格掃描
                 last_result_idx = -1 
                 last_item_idx = 0
 
@@ -253,6 +238,7 @@ def process_files(files):
                         
                         if is_skip_table: continue 
 
+                        # 表頭記憶
                         if result_idx != -1:
                             last_result_idx = result_idx
                             last_item_idx = item_idx if item_idx != -1 else 0
@@ -277,7 +263,6 @@ def process_files(files):
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # 備援掃描 (倒著找) - 這裡會抓到 A16 下面的 "9"
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -365,9 +350,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v31.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v31.0)")
-st.info("💡 v31.0：終極修復：只要表格包含 MDL/Unit 就強制判定為有效表格，確保 SGS 混和型表格能被抓取。")
+st.set_page_config(page_title="SGS 報告聚合工具 v30.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v30.0)")
+st.info("💡 v30.0：加入 MDL 強制定位機制，即使表頭標示不清 (如 A16)，只要找到 MDL 就能抓到結果。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -388,7 +373,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v31.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v30.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

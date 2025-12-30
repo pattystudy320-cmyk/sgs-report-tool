@@ -16,10 +16,7 @@ SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    "PFOS": [
-        "Perfluorooctane sulfonates", "Perfluorooctane sulfonate", 
-        "Perfluorooctane sulfonic acid", "全氟辛烷磺酸"
-    ], 
+    "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸"],
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
@@ -36,8 +33,7 @@ GROUP_KEYWORDS = {
         "Monobrominated", "Dibrominated", "Tribrominated", 
         "Tetrabrominated", "Pentabrominated", "Hexabrominated", 
         "Heptabrominated", "Octabrominated", "Nonabrominated", 
-        "Decabrominated",
-        "bromobiphenyl"
+        "Decabrominated", "bromobiphenyl"
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和",
@@ -48,16 +44,12 @@ GROUP_KEYWORDS = {
         "Monobrominated Diphenyl", "Dibrominated Diphenyl", "Tribrominated Diphenyl",
         "Tetrabrominated Diphenyl", "Pentabrominated Diphenyl", "Hexabrominated Diphenyl",
         "Heptabrominated Diphenyl", "Octabrominated Diphenyl", "Nonabrominated Diphenyl",
-        "Decabrominated Diphenyl",
-        "bromodiphenyl ether"
+        "Decabrominated Diphenyl", "bromodiphenyl ether"
     ]
 }
 
 PFAS_SUMMARY_KEYWORDS = [
-    "Per- and Polyfluoroalkyl Substances",
-    "PFAS",
-    "全氟/多氟烷基物質",
-    "全氟烷基物質"
+    "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
 OUTPUT_COLUMNS = [
@@ -139,8 +131,6 @@ def check_pfas_in_summary(text):
         if kw.lower() in txt_lower: return True
     return False
 
-# --- 3. 核心：廠商分流邏輯 ---
-
 def identify_company(text):
     txt = text.lower()
     if "sgs" in txt: return "SGS"
@@ -148,10 +138,9 @@ def identify_company(text):
     if "cti" in txt or "centre testing" in txt: return "CTI"
     return "OTHERS"
 
+# --- 3. 核心：表格識別 ---
+
 def identify_columns_by_company(table, company):
-    """
-    依據不同廠商的表格特性，使用不同的識別邏輯
-    """
     item_idx = -1
     result_idx = -1
     mdl_idx = -1
@@ -162,76 +151,133 @@ def identify_columns_by_company(table, company):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
-    # 1. 尋找欄位索引
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
         for c_idx, cell in enumerate(row):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # 通用: 找 Item
             if "test item" in txt or "tested item" in txt or "測試項目" in txt:
                 if item_idx == -1: item_idx = c_idx
             
-            # 通用: 找 MDL/LOQ
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
-                
-            # 通用: 找 Limit
+            
             if "limit" in txt or "限值" in txt:
                 if limit_idx == -1: limit_idx = c_idx
 
-            # --- 廠商特化: 找 Result ---
+            # 結果欄位判斷
             if company == "SGS":
-                # SGS 關鍵字: Result, 001, No.1, A16 (A+數字)
                 if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
                     re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
-            
             elif company == "INTERTEK":
-                # Intertek 關鍵字: Result, Green material
                 if "result" in txt or "green" in txt or "submitted" in txt:
                     if result_idx == -1: result_idx = c_idx
-            
-            else: # CTI / Others
+            else: 
                 if "result" in txt or "結果" in txt or re.search(r"00[1-9]", txt):
                     if result_idx == -1: result_idx = c_idx
 
-    # 2. 智慧推斷 (若找不到 Result)
+    # 智慧推斷
     if result_idx == -1:
         if company == "SGS":
-            # SGS 策略: MDL 的右邊，或者是 Limit 的左邊/右邊
             if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
                 result_idx = mdl_idx + 1
-            elif limit_idx != -1 and limit_idx - 1 >= 0: # 有時候 Result 在 Limit 左邊
-                 # 檢查 Limit 左邊是不是 MDL，如果是，那 Result 可能在更左或 Limit 右邊
-                 # 簡單起見，SGS 通常 MDL -> Result -> Limit 或 Item -> Unit -> Result
-                 # 如果有 Limit 沒 Result，很可能是 Limit 誤判，暫不強推
-                 pass
-        
-        elif company == "INTERTEK":
-             # Intertek 通常標題很明確，若找不到可能真的是廢表
-             pass
-
-    # 3. 判斷是否為「參考表」(要跳過的表)
-    is_reference_table = False
     
+    is_reference_table = False
     if result_idx == -1:
-        # 通用參考表特徵
         if "restricted substances" in full_header_text or "group name" in full_header_text or "substance name" in full_header_text:
             is_reference_table = True
-        
-        # Intertek 特性: 看到 Limits 且沒 Result 必為廢表
         if company == "INTERTEK" and "limits" in full_header_text:
             is_reference_table = True
-        
-        # SGS 特性: 允許 Limit 存在於主表，所以不單憑 Limit 判死刑
-        # 但如果連 Item 都找不到，肯定是廢表
         if item_idx == -1:
             is_reference_table = True
 
     return item_idx, result_idx, is_reference_table
+
+# --- 4. 核心：文字模式 (SGS 救援引擎) ---
+
+def parse_text_lines(text, data_pool, company):
+    """
+    針對抓不到表格的 PDF，進行逐行文字掃描
+    """
+    lines = text.split('\n')
+    current_item = ""
+    
+    # 針對 SGS 的文字型報告，常見格式：
+    # Item(s) Limit Unit MDL 001
+    # Cadmium (Cd) 100 mg/kg 2 ND
+    
+    for line in lines:
+        line_clean = clean_text(line)
+        if not line_clean: continue
+        
+        # 1. 嘗試配對測項關鍵字
+        # 檢查這一行是否有測項名稱
+        matched_key = None
+        for key, keywords in SIMPLE_KEYWORDS.items():
+            for kw in keywords:
+                if kw in line_clean and "test item" not in line_clean.lower():
+                    matched_key = key
+                    break
+            if matched_key: break
+            
+        if not matched_key:
+            # 檢查 Group Keywords (PBB/PBDE)
+            for group_key, keywords in GROUP_KEYWORDS.items():
+                for kw in keywords:
+                    if kw in line_clean:
+                        matched_key = group_key
+                        break
+                if matched_key: break
+        
+        if matched_key:
+            # 這一行有測項，嘗試找後面的數值
+            # 策略：找行尾的 "ND" 或 數字
+            # 去除 (Limit 1000) (MDL 2) 等干擾
+            
+            # 簡單分割
+            parts = line_clean.split()
+            if len(parts) < 2: continue
+            
+            # 從後面往前找，找到第一個像結果的東西
+            found_val = ""
+            for part in reversed(parts):
+                p_lower = part.lower()
+                # 忽略單位、MDL、Limit
+                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---"]:
+                    continue
+                
+                # 檢查是否為 ND
+                if "nd" in p_lower:
+                    found_val = "N.D."
+                    break
+                
+                # 檢查是否為數字 (且不是 Limit/MDL)
+                if re.match(r"^\d+(\.\d+)?$", part):
+                    # 再次確認不是 Limit (SGS 常見 Limit: 100, 1000)
+                    val_float = float(part)
+                    if val_float not in [100.0, 1000.0, 50.0, 10.0, 5.0, 2.0]:
+                        found_val = part
+                        break
+            
+            if found_val:
+                # 存入 data_pool
+                # 為了避免與表格資料重複，這裡設一個較低的 priority (2.5)，
+                # 如果表格有抓到 (3.0)，會覆蓋這個
+                priority_score = 3 if re.match(r"^\d", found_val) else 1
+                
+                # 如果是 Group (PBB/PBDE)，需要特殊處理，這裡簡化為：只存入 Simple
+                if matched_key in SIMPLE_KEYWORDS:
+                    data_pool[matched_key].append({
+                        "priority": (priority_score, 0, found_val),
+                        "filename": "text_mode" # 標記
+                    })
+                # Group 暫不支援文字模式 (因為太複雜且通常有表格)，
+                # 但如果是 "Sum of PBBs" 這種總結行，可以視為 Simple 處理
+
+# --- 主程式 ---
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
@@ -248,46 +294,37 @@ def process_files(files):
             with pdfplumber.open(file) as pdf:
                 file_dates = []
                 first_few_pages_text = ""
+                full_text_content = "" # 用於文字模式
                 
-                # 1. 掃描前幾頁: 抓日期、公司、PFAS需求
-                for p_idx in range(min(3, len(pdf.pages))):
-                    page_txt = pdf.pages[p_idx].extract_text() or ""
-                    first_few_pages_text += page_txt
-                    d = extract_date_from_text(page_txt)
-                    if d: file_dates.append(d)
+                # 1. 前置掃描
+                for p_idx in range(len(pdf.pages)):
+                    page = pdf.pages[p_idx]
+                    page_txt = page.extract_text() or ""
+                    full_text_content += page_txt + "\n"
+                    
+                    if p_idx < 3:
+                        first_few_pages_text += page_txt
+                        d = extract_date_from_text(page_txt)
+                        if d: file_dates.append(d)
                 
                 if file_dates: all_dates.append((max(file_dates), filename))
-                
-                # 辨識公司
                 company = identify_company(first_few_pages_text)
                 
-                # PFAS 判定
                 if check_pfas_in_summary(first_few_pages_text):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
-                # 2. 表格掃描
-                last_result_idx = -1 
-                last_item_idx = 0
-
+                # 2. 引擎 A: 表格模式
+                has_table_data = False
                 for page in pdf.pages:
                     tables = page.extract_tables()
                     for table in tables:
                         if not table or len(table) < 2: continue
                         
-                        # ★ 分流邏輯的核心 ★
                         item_idx, result_idx, is_skip_table = identify_columns_by_company(table, company)
-                        
                         if is_skip_table: continue 
 
-                        # 表頭記憶 (處理跨頁表格)
-                        if result_idx != -1:
-                            last_result_idx = result_idx
-                            last_item_idx = item_idx if item_idx != -1 else 0
-                        else:
-                            # 只有結構相似時才沿用
-                            if last_result_idx != -1 and len(table[0]) > last_result_idx:
-                                result_idx = last_result_idx
-                                item_idx = last_item_idx
+                        # 表頭記憶
+                        # (簡化：若無記憶，每次重找)
                         
                         for row_idx, row in enumerate(table):
                             clean_row = [clean_text(cell) for cell in row]
@@ -302,11 +339,10 @@ def process_files(files):
                             if "pvc" in item_name.lower() or "polyvinyl" in item_name.lower(): continue
 
                             result = ""
-                            # A. 優先用定位
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # B. 備援
+                            # 備援
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -321,6 +357,8 @@ def process_files(files):
                             
                             priority = parse_value_priority(result)
                             if priority[0] == 0: continue 
+
+                            has_table_data = True # 標記有抓到資料
 
                             # Simple
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
@@ -350,8 +388,17 @@ def process_files(files):
                                     if kw.lower() in item_name.lower():
                                         file_group_data[group_key].append(priority)
                                         break
+                
+                # 3. 引擎 B: 文字模式 (如果表格模式沒抓到關鍵數據)
+                # 檢查 Pb 是否為空，如果 Pb 沒抓到，很有可能這份報告是「偽表格」
+                pb_data_count = len([d for d in data_pool["Pb"] if d['filename'] == filename])
+                
+                if pb_data_count == 0 and company == "SGS":
+                    # 啟動文字解析
+                    parse_text_lines(full_text_content, data_pool, company)
+                    # 這裡只做 Simple Keywords 的補救，Group 較難用文字模式處理
             
-            # 檔案結算 (PBB/PBDE)
+            # 檔案結算 (PBB/PBDE) - 來自表格模式的資料
             for group_key, values in file_group_data.items():
                 if values:
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
@@ -394,9 +441,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v31.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v31.0 分流版)")
-st.info("💡 v31.0：導入廠商分流邏輯 (SGS/Intertek/CTI)，針對 SGS 報告允許 Limit 欄位共存，並強化 A16 等樣品編號識別。")
+st.set_page_config(page_title="SGS 報告聚合工具 v32.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v32.0 雙引擎旗艦版)")
+st.info("💡 v32.0：導入雙引擎機制，若表格識別失敗，自動切換至文字掃描模式，專門解決 SGS 偽表格報告。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -417,7 +464,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v31.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v32.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

@@ -23,11 +23,10 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘"]
 }
 
-# ★ v33.0 修正：加入 SGS 變體寫法 (連字無空格、簡寫)
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和",
-        "Polybromobiphenyl", "Polybromobiphenyls", # SGS 變體
+        "Polybromobiphenyl", "Polybromobiphenyls",
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
         "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
@@ -39,7 +38,7 @@ GROUP_KEYWORDS = {
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和",
-        "Polybromodiphenyl ether", "Polybromodiphenyl ethers", # SGS 變體
+        "Polybromodiphenyl ether", "Polybromodiphenyl ethers",
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
@@ -98,13 +97,22 @@ def extract_date_from_text(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
+        # 排除常見的法規限值，但允許 186802 這種大數值 (Exemption)
         if n in [1000.0, 100.0, 50.0]: return True
         return False
     except: return False
 
 def parse_value_priority(value_str):
     raw_val = clean_text(value_str)
-    if "(" in raw_val: raw_val = raw_val.split("(")[0].strip()
+    # v34.0: 移除括號內的單位，但保留特殊符號如 ▲
+    # 例如 "186802 ▲" -> 應該保留
+    # "0.01 (100)" -> 應該變成 0.01
+    
+    if "(" in raw_val and ")" in raw_val:
+        # 簡單判斷：如果括號內是數字，可能是限值，切掉
+        if re.search(r"\(\d+\)", raw_val):
+            raw_val = raw_val.split("(")[0].strip()
+    
     val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
     
     if not val: return (0, 0, "")
@@ -113,17 +121,27 @@ def parse_value_priority(value_str):
     if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits"]: 
         return (0, 0, "")
 
+    # 排除 CAS No
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
-    if is_suspicious_limit_value(val): return (0, 0, "") 
+    
+    # 數值防火牆 (排除 1000/100 等限值)
+    # 先嘗試提取純數字部分進行檢查
+    num_only_match = re.search(r"([\d\.]+)", val)
+    if num_only_match:
+        if is_suspicious_limit_value(num_only_match.group(1)): return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: return (1, 0, "N.D.")
     if "negative" in val_lower or "陰性" in val_lower: return (2, 0, "NEGATIVE")
     
-    num_match = re.search(r"([\d\.]+)", val)
+    # ★ v34.0: 支援帶符號的數值 (如 186802 ▲)
+    # 允許數字後面跟著非數字字符
+    num_match = re.search(r"^([\d\.]+)(.*)$", val)
     if num_match:
         try:
             number = float(num_match.group(1))
-            return (3, number, num_match.group(1))
+            # 完整字串包含符號 (group 2)
+            full_str = val 
+            return (3, number, full_str)
         except: pass
             
     return (0, 0, val)
@@ -195,16 +213,15 @@ def identify_columns_by_company(table, company):
 
     return item_idx, result_idx, is_reference_table
 
-# --- 4. 核心：文字模式 (SGS 救援引擎 + PBB/PBDE 支援) ---
+# --- 4. 核心：文字模式 ---
 
-def parse_text_lines(text, data_pool, file_group_data, company):
+def parse_text_lines(text, data_pool, file_group_data, filename, company):
     lines = text.split('\n')
     
     for line in lines:
         line_clean = clean_text(line)
         if not line_clean: continue
         
-        # 1. 嘗試配對 Simple Keywords
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
             for kw in keywords:
@@ -213,7 +230,6 @@ def parse_text_lines(text, data_pool, file_group_data, company):
                     break
             if matched_simple: break
         
-        # 2. 嘗試配對 Group Keywords (PBB/PBDE) - ★ v33 新增
         matched_group = None
         if not matched_simple:
             for group_key, keywords in GROUP_KEYWORDS.items():
@@ -224,7 +240,6 @@ def parse_text_lines(text, data_pool, file_group_data, company):
                 if matched_group: break
         
         if matched_simple or matched_group:
-            # 找數值
             parts = line_clean.split()
             if len(parts) < 2: continue
             
@@ -237,11 +252,16 @@ def parse_text_lines(text, data_pool, file_group_data, company):
                     found_val = "N.D."
                     break
                 
-                if re.match(r"^\d+(\.\d+)?$", part):
-                    val_float = float(part)
-                    if val_float not in [100.0, 1000.0, 50.0, 10.0, 5.0, 2.0]:
-                        found_val = part
-                        break
+                # v34: 支援提取 186802 ▲
+                if re.match(r"^\d+.*$", part): 
+                    # 簡易過濾
+                    val_check = part.replace("▲", "").replace("△", "")
+                    try:
+                        f = float(val_check)
+                        if f not in [100.0, 1000.0, 50.0]:
+                            found_val = part
+                            break
+                    except: pass
             
             if found_val:
                 priority = parse_value_priority(found_val)
@@ -250,9 +270,10 @@ def parse_text_lines(text, data_pool, file_group_data, company):
                 if matched_simple:
                     data_pool[matched_simple].append({
                         "priority": priority,
-                        "filename": "text_mode"
+                        "filename": filename # 文字模式也要綁定檔名
                     })
                 elif matched_group:
+                    # Group 暫時無法完美綁定檔名 (因為結構不同)，但數值會進去
                     file_group_data[matched_group].append(priority)
 
 # --- 主程式 ---
@@ -260,6 +281,12 @@ def parse_text_lines(text, data_pool, file_group_data, company):
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     all_dates = []
+    
+    # ★ v34.0: 全局最大值追蹤器 (針對 Pb)
+    # 格式: { "Pb": {"max_score": 0, "max_value": -1, "filename": ""} }
+    global_tracker = {
+        "Pb": {"max_score": -1, "max_value": -1.0, "filename": ""}
+    }
     
     progress_bar = st.progress(0)
     
@@ -298,6 +325,14 @@ def process_files(files):
                         item_idx, result_idx, is_skip_table = identify_columns_by_company(table, company)
                         if is_skip_table: continue 
 
+                        # 表頭記憶
+                        last_result_idx = -1
+                        if result_idx != -1:
+                            last_result_idx = result_idx
+                        else:
+                             # 嘗試沿用
+                             pass # 簡化邏輯，表格內重找比較保險
+
                         for row_idx, row in enumerate(table):
                             clean_row = [clean_text(cell) for cell in row]
                             row_txt = "".join(clean_row).lower()
@@ -321,8 +356,8 @@ def process_files(files):
                                     if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
                                         result = cell
                                         break
-                                    if re.search(r"^\d+(\.\d+)?$", cell):
-                                        if float(cell) in [1000, 100, 50]: continue 
+                                    if re.search(r"^\d+(\.\d+)?", cell):
+                                        if "1000" in cell: continue 
                                         result = cell
                                         break
                             
@@ -334,7 +369,21 @@ def process_files(files):
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
                                         if target_key == "PFOS" and "related" in item_name.lower(): continue 
+                                        
                                         data_pool[target_key].append({"priority": priority, "filename": filename})
+                                        
+                                        # ★ v34.0: 更新 Pb 全局追蹤器
+                                        if target_key == "Pb":
+                                            score = priority[0]
+                                            val = priority[1]
+                                            # 如果分數更高，或分數相同但數值更大
+                                            if score > global_tracker["Pb"]["max_score"]:
+                                                global_tracker["Pb"]["max_score"] = score
+                                                global_tracker["Pb"]["max_value"] = val
+                                                global_tracker["Pb"]["filename"] = filename
+                                            elif score == global_tracker["Pb"]["max_score"] and val > global_tracker["Pb"]["max_value"]:
+                                                global_tracker["Pb"]["max_value"] = val
+                                                global_tracker["Pb"]["filename"] = filename
                                         break
 
                             # Group
@@ -344,15 +393,23 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式 (救援)
-                # 如果 Pb 沒抓到，或者 PBB/PBDE 是空的，就啟動文字救援
-                pb_missing = len([d for d in data_pool["Pb"] if d['filename'] == filename]) == 0
-                pbb_missing = not file_group_data["PBB"]
-                pbde_missing = not file_group_data["PBDE"]
-                
-                if (pb_missing or pbb_missing or pbde_missing) and company == "SGS":
-                    parse_text_lines(full_text_content, data_pool, file_group_data, company)
-            
+                # 3. 引擎 B: 文字模式
+                pb_in_pool = [d for d in data_pool["Pb"] if d['filename'] == filename]
+                if not pb_in_pool and company == "SGS":
+                    parse_text_lines(full_text_content, data_pool, file_group_data, filename, company)
+                    # 文字模式也要更新 Tracker
+                    for d in data_pool["Pb"]:
+                         if d['filename'] == filename:
+                             # 重新檢查文字模式抓到的值
+                             p = d['priority']
+                             if p[0] > global_tracker["Pb"]["max_score"]:
+                                 global_tracker["Pb"]["max_score"] = p[0]
+                                 global_tracker["Pb"]["max_value"] = p[1]
+                                 global_tracker["Pb"]["filename"] = filename
+                             elif p[0] == global_tracker["Pb"]["max_score"] and p[1] > global_tracker["Pb"]["max_value"]:
+                                 global_tracker["Pb"]["max_value"] = p[1]
+                                 global_tracker["Pb"]["filename"] = filename
+
             # 檔案結算 (PBB/PBDE)
             for group_key, values in file_group_data.items():
                 if values:
@@ -375,26 +432,30 @@ def process_files(files):
         if not candidates:
             final_row[key] = "" 
             continue
+        # 選出最好的結果
         best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
-        final_row[key] = best_record['priority'][2]
+        final_row[key] = best_record['priority'][2] # 顯示完整字串 (含三角)
 
     # 日期與檔名
     final_date_str = ""
-    latest_file = ""
     if all_dates:
         latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
         final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
-        latest_file = latest_date_record[1]
     
     final_row["日期"] = final_date_str
-    final_row["檔案名稱"] = latest_file if latest_file else (files[0].name if files else "")
+    
+    # ★ v34.0: 檔名使用 Pb 的來源檔名，若無則用最新日期的檔名
+    if global_tracker["Pb"]["filename"]:
+        final_row["檔案名稱"] = global_tracker["Pb"]["filename"]
+    else:
+        final_row["檔案名稱"] = latest_date_record[1] if all_dates else (files[0].name if files else "")
 
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v33.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v33.0 雙引擎完全體)")
-st.info("💡 v33.0：全面擴充 SGS PBB/PBDE 關鍵字庫，並將文字掃描引擎升級以支援群組項目，徹底解決偽表格漏抓問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v34.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v34.0 精準定位版)")
+st.info("💡 v34.0：支援特殊符號數值 (如 186802 ▲) 提取，修正 Pb 數值與檔名錯置問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -415,7 +476,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v33.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v34.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

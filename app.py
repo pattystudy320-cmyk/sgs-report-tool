@@ -5,11 +5,11 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 定義欄位與關鍵字 (v36.0: 新增 CTI 中文細項) ---
+# --- 1. 定義欄位與關鍵字 ---
 
 SIMPLE_KEYWORDS = {
-    "Pb": ["Lead", "铅", "Pb"], # 簡體鉛
-    "Cd": ["Cadmium", "镉", "Cd"], # 簡體鎘
+    "Pb": ["Lead", "铅", "Pb"], 
+    "Cd": ["Cadmium", "镉", "Cd"], 
     "Hg": ["Mercury", "汞", "Hg"],
     "Cr6+": ["Hexavalent Chromium", "六价铬", "六價鉻", "Cr(VI)", "Chromium VI", "Cr6+"],
     "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate", "邻苯二甲酸二(2-乙基己基)酯"],
@@ -23,7 +23,6 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘"]
 }
 
-# v36.0: 針對 CTI 報告，加入完整的中文細項關鍵字，確保能抓到細項的 N.D.
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "多溴联苯", "多溴聯苯",
@@ -64,8 +63,9 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
+# 黑名單：標準號、年份等
 BLACKLIST_NUMBERS = [
-    6476, 3052, 14582, 62321, 17025, 2011, 2015, 2021, 2022, 2023, 2024, 2025, 62321
+    6476, 3052, 14582, 62321, 17025, 2011, 2015, 2021, 2022, 2023, 2024, 2025
 ]
 
 # --- 2. 輔助功能 ---
@@ -107,6 +107,7 @@ def extract_date_from_text(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
+        # v36.1: 擴展限值清單，這些數字出現在表格中極大概率是 Limit 而非 Result
         if n in [1000.0, 100.0, 50.0, 10.0, 8.0, 5.0, 2.0]: return True
         return False
     except: return False
@@ -128,9 +129,7 @@ def parse_value_priority(value_str, target_key=None):
 
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
-
-    # v36.0: CTI 報告有時會出現樣品編號 (如 026) 在 Result 欄位下方，需過濾
-    if val == "026" or val == "001" or val == "002": return (0, 0, "")
+    if val in ["026", "001", "002"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
     if "negative" in val_lower or "阴性" in val_lower: return (2, 0, "NEGATIVE")
@@ -142,13 +141,18 @@ def parse_value_priority(value_str, target_key=None):
     if num_match:
         try:
             number = float(num_match.group(1))
+            
+            # v36.1: 重要修正 - 提取出數字後，再次檢查是否為限值 (1000, 100)
+            # 這能解決 "1000 mg/kg" 被轉為 1000 後逃過檢查的問題
+            if is_suspicious_limit_value(number): return (0, 0, "")
+
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
 
             is_halogen = target_key in ["F", "CL", "BR", "I"]
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
-                if number in [2.0, 5.0, 8.0, 10.0, 50.0]:
-                    pass 
+                # 非鹵素的整數 5, 8, 10 等也常是 MDL
+                if number in [2.0, 5.0, 8.0, 10.0, 50.0]: return (0, 0, "")
 
             full_str = val 
             return (3, number, full_str)
@@ -170,12 +174,13 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. 核心：表格識別 (v36.0 CTI 優化) ---
+# --- 3. 核心：表格識別 (v36.1 CTI 限值封鎖) ---
 
 def identify_columns_by_company(table, company):
     item_idx = -1
     result_idx = -1
     mdl_idx = -1
+    limit_idx = -1 # v36.1 新增：限值欄位
     
     max_scan_rows = min(5, len(table))
     
@@ -187,37 +192,42 @@ def identify_columns_by_company(table, company):
             if "test item" in txt or "tested item" in txt or "测试项目" in txt or "substance name" in txt:
                 if item_idx == -1: item_idx = c_idx
     
-    # 2. 找 Result 和 MDL 欄
+    # 2. 找 Result, MDL, Limit 欄
     for r in range(max_scan_rows):
         row = table[r]
         for c_idx, cell in enumerate(row):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # v36.0: CTI 特徵 - 找 "方法检出限"
             if "mdl" in txt or "loq" in txt or "检出限" in txt:
                 mdl_idx = c_idx
             
-            if "limit" in txt or "unit" in txt or "method" in txt or "cas" in txt: continue
+            # v36.1: 明確標記限值欄位
+            if "limit" in txt or "限值" in txt:
+                limit_idx = c_idx
+                continue # 限值欄位絕對不是結果欄
+            
+            if "unit" in txt or "method" in txt or "cas" in txt: continue
 
-            # v36.0: CTI 特徵 - 找 "结果"
             if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "claimed" in txt:
                  if result_idx == -1: result_idx = c_idx
 
-    if result_idx == mdl_idx and result_idx != -1:
-        result_idx = -1 
+    # 防呆修正
+    if result_idx == mdl_idx and result_idx != -1: result_idx = -1
+    if result_idx == limit_idx and result_idx != -1: result_idx = -1 # 結果欄不能是限值欄
 
     if item_idx == -1: item_idx = 0
     
-    # Fallback
     if result_idx == -1 and len(table[0]) > 2: 
         candidate_idx = len(table[0]) - 1
-        if candidate_idx != mdl_idx:
-            result_idx = candidate_idx
-        else:
-            result_idx = candidate_idx - 1
+        # 往左找，避開 MDL 和 Limit
+        while candidate_idx >= 0:
+            if candidate_idx != mdl_idx and candidate_idx != limit_idx:
+                result_idx = candidate_idx
+                break
+            candidate_idx -= 1
 
-    return item_idx, result_idx, mdl_idx
+    return item_idx, result_idx, mdl_idx, limit_idx
 
 # --- 4. 核心：文字模式 ---
 
@@ -259,7 +269,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename):
                 if p_lower in ["mg/kg", "ppm", "uqt", "loq", "mdl", "---", "-"]: continue
                 
                 priority = parse_value_priority(part, target_key=matched_simple)
-                
                 if priority[0] > 0:
                     found_val = part
                     break
@@ -276,9 +285,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename):
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     all_dates = []
-    
     global_tracker = {key: {"max_score": -1, "max_value": -1.0, "filename": ""} for key in SIMPLE_KEYWORDS.keys()}
-    
     progress_bar = st.progress(0)
     
     for i, file in enumerate(files):
@@ -309,7 +316,8 @@ def process_files(files):
                     for table in tables:
                         if not table or len(table) < 2: continue
                         
-                        item_idx, result_idx, mdl_idx = identify_columns_by_company(table, company)
+                        # v36.1: 獲取限值欄位 limit_idx
+                        item_idx, result_idx, mdl_idx, limit_idx = identify_columns_by_company(table, company)
                         if item_idx == -1: continue 
 
                         for row in table:
@@ -325,23 +333,23 @@ def process_files(files):
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result_cell = clean_row[result_idx]
                             
-                            # Fallback
+                            # Fallback 掃描
                             if not result_cell:
-                                for cell in clean_row:
+                                for col_idx, cell in enumerate(clean_row):
+                                    # v36.1: 絕對不掃描 Limit 欄位和 MDL 欄位
+                                    if col_idx == limit_idx or col_idx == mdl_idx: continue
+                                    
                                     if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
                                         result_cell = cell
                                         break
                                     if re.match(r"^\d+(\.\d+)?$", clean_text(cell)):
-                                         current_col_idx = clean_row.index(cell)
-                                         if current_col_idx == mdl_idx: continue
                                          if not is_suspicious_limit_value(cell):
                                             result_cell = cell
 
-                            # 識別 Item Key
                             current_key = None
                             for k, v in SIMPLE_KEYWORDS.items():
                                 for kw in v:
-                                    if kw in item_name or kw.lower() in item_name.lower(): # CTI 中文匹配很重要
+                                    if kw in item_name or kw.lower() in item_name.lower():
                                         current_key = k
                                         break
                                 if current_key: break
@@ -366,10 +374,10 @@ def process_files(files):
                                             global_tracker[target_key]["filename"] = filename
                                         break
                             
-                            # Group Keywords (PBB/PBDE)
+                            # Group Keywords
                             for group_key, keywords in GROUP_KEYWORDS.items():
                                 for kw in keywords:
-                                    if kw in item_name or kw.lower() in item_name.lower(): # CTI 中文匹配
+                                    if kw in item_name or kw.lower() in item_name.lower():
                                         file_group_data[group_key].append(priority)
                                         break
                 
@@ -405,7 +413,6 @@ def process_files(files):
 
     # --- 最終聚合 ---
     final_row = {}
-    
     for key in OUTPUT_COLUMNS:
         if key in ["日期", "檔案名稱"]: continue
         candidates = data_pool.get(key, [])
@@ -420,8 +427,6 @@ def process_files(files):
         latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
         final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
     
-    final_row["日期"] = final_date_str
-    
     final_file = ""
     if global_tracker["Pb"]["filename"]:
         final_file = global_tracker["Pb"]["filename"]
@@ -430,14 +435,15 @@ def process_files(files):
     else:
         final_file = latest_date_record[1] if all_dates else (files[0].name if files else "Unknown")
         
+    final_row["日期"] = final_date_str
     final_row["檔案名稱"] = final_file
 
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v36.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v36.0 CTI 專項版)")
-st.info("💡 v36.0：新增 CTI 報告專用邏輯 (支援中文細項抓取、排除樣品編號干擾、優化方法檢出限識別)。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v36.1", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v36.1 限值封鎖版)")
+st.error("🛠️ v36.1：強制封鎖 CTI 報告中的 Limit (限值) 欄位，徹底解決誤抓 1000/100 等限值問題。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

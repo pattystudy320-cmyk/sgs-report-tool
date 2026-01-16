@@ -101,10 +101,14 @@ def is_suspicious_limit_value(val):
     except: return False
 
 def parse_value_priority(value_str, target_key=None, is_text_mode=False):
+    """
+    v36.3: 增加 is_text_mode 參數，針對文字模式進行更嚴格的過濾
+    """
     raw_val = clean_text(value_str)
     
-    # 移除括號雜訊
+    # 移除括號雜訊 (1) -> 丟棄
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "")
+    
     if "(" in raw_val: raw_val = raw_val.split("(")[0].strip()
     
     val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
@@ -133,10 +137,11 @@ def parse_value_priority(value_str, target_key=None, is_text_mode=False):
         try:
             number = float(num_match.group(1))
             
+            # 數值黑名單
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             
-            # v36.4: 針對文字模式的強力過濾
-            # 如果是 Text Mode 且是純整數 < 100，視為頁碼或日期雜訊
+            # v36.3: 文字模式雜訊過濾 (解決 PFOS=25, I=19)
+            # 如果是純整數，且小於 100，且是文字模式，極大概率是頁碼或日期
             if is_text_mode and number.is_integer() and number < 100:
                 return (0, 0, "")
 
@@ -210,6 +215,8 @@ def identify_columns_by_company(table, company):
 
     if item_idx == -1: item_idx = 0
     
+    # Fallback Logic:
+    # 如果找不到明確的 Result，且不是 Limit/MDL/CAS，則嘗試向左推
     if result_idx == -1 and len(table[0]) > 2: 
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -222,7 +229,7 @@ def identify_columns_by_company(table, company):
 
 # --- 4. 核心：文字模式 ---
 
-def parse_text_lines(text, data_pool, file_group_data, filename, found_elements, debug_logs):
+def parse_text_lines(text, data_pool, file_group_data, filename, found_elements):
     lines = text.split('\n')
     for line in lines:
         line_clean = clean_text(line)
@@ -235,7 +242,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
 
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
-            if key in found_elements: continue 
+            if key in found_elements: continue # 如果已在表格找到，直接跳過文字掃描
 
             for kw in keywords:
                 if kw in line_clean and "test item" not in line_lower:
@@ -261,6 +268,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "uqt", "loq", "mdl", "---", "-"]: continue
                 
+                # v36.3: 標記 is_text_mode=True
                 priority = parse_value_priority(part, target_key=matched_simple, is_text_mode=True)
                 if priority[0] > 0:
                     found_val = part
@@ -269,22 +277,19 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
             if found_val:
                 priority = parse_value_priority(found_val, target_key=matched_simple, is_text_mode=True)
                 if matched_simple:
+                    # 標記 source=1 (Text)
                     data_pool[matched_simple].append({"priority": priority, "filename": filename, "source": 1})
-                    # Debug Log
-                    debug_logs.append({
-                        "File": filename, "Element": matched_simple, 
-                        "Value": found_val, "Type": "Text", "Raw": line_clean
-                    })
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
 # --- 主程式 ---
 
 def process_files(files):
+    # data_pool 結構更新：包含 source (2=Table, 1=Text)
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     all_dates = []
-    debug_logs = [] # v36.4: 收集所有抓取紀錄
     
+    # 追蹤器用於決定檔名，Pb 優先
     global_tracker = {key: {"max_score": -1, "max_value": -1.0, "filename": ""} for key in SIMPLE_KEYWORDS.keys()}
     progress_bar = st.progress(0)
     
@@ -309,8 +314,8 @@ def process_files(files):
                 company = identify_company(full_text_content[:2000])
                 
                 if check_pfas_in_summary(full_text_content[:2000]):
+                    # PFAS Summary 視為 Table 等級的權威 (4)
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename, "source": 2})
-                    debug_logs.append({"File": filename, "Element": "PFAS", "Value": "REPORT", "Type": "Summary", "Raw": "Summary Keyword"})
 
                 # --- 表格模式 ---
                 for page in pdf.pages:
@@ -361,15 +366,10 @@ def process_files(files):
                                     if kw in item_name or kw.lower() in item_name.lower():
                                         if target_key == "PFOS" and ("related" in item_name.lower() or "derivative" in item_name.lower()): continue
                                         
+                                        # 標記 source=2 (Table)
                                         data_pool[target_key].append({"priority": priority, "filename": filename, "source": 2})
                                         found_elements_in_table.add(target_key)
                                         
-                                        # Debug Log
-                                        debug_logs.append({
-                                            "File": filename, "Element": target_key, 
-                                            "Value": result_cell, "Type": "Table", "Raw": str(clean_row)
-                                        })
-
                                         score, val, _ = priority
                                         if score > global_tracker[target_key]["max_score"]:
                                             global_tracker[target_key]["max_score"] = score
@@ -388,9 +388,9 @@ def process_files(files):
                                         break
                 
                 # --- 文字模式 ---
-                parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table, debug_logs)
+                parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table)
                 
-                # 更新 Tracker
+                # 更新 Tracker (for filename)
                 for k in SIMPLE_KEYWORDS.keys():
                     for d in data_pool[k]:
                          p = d['priority']
@@ -406,6 +406,7 @@ def process_files(files):
             for group_key, values in file_group_data.items():
                 if values:
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                    # Group 通常來自表格，暫定 source=2
                     data_pool[group_key].append({
                         "priority": best_in_file,
                         "filename": filename,
@@ -417,7 +418,7 @@ def process_files(files):
         
         progress_bar.progress((i + 1) / len(files))
 
-    # --- 最終聚合 ---
+    # --- 最終聚合 (v36.3 關鍵邏輯: Source 權重) ---
     final_row = {}
     for key in OUTPUT_COLUMNS:
         if key in ["日期", "檔案名稱"]: continue
@@ -426,6 +427,7 @@ def process_files(files):
             final_row[key] = "" 
             continue
         
+        # 排序權重：Source (Table=2 > Text=1) -> Priority (Val>ND) -> Value -> String
         best_record = sorted(candidates, key=lambda x: (x.get('source', 0), x['priority'][0], x['priority'][1]), reverse=True)[0]
         final_row[key] = best_record['priority'][2]
 
@@ -445,19 +447,19 @@ def process_files(files):
     final_row["日期"] = final_date_str
     final_row["檔案名稱"] = final_file
 
-    return [final_row], debug_logs
+    return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v36.4", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v36.4 偵錯版)")
-st.error("🛠️ v36.4：新增「偵錯模式」可溯源數值來源。修正文字模式下 PFOS(25)/I(19) 等雜訊，強制過濾小整數。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v36.3", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v36.3 權威修正版)")
+st.error("🛠️ v36.3：修正 PFOS (25)、I (19) 等雜訊。引入「表格權威機制」：若元素在表格中已找到，將強制忽略該元素的所有文字模式雜訊，並修正 Halogen 報告的抓取邏輯。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
     if st.button("🔄 開始分析"):
         try:
-            result_data, debug_logs = process_files(uploaded_files)
+            result_data = process_files(uploaded_files)
             df = pd.DataFrame(result_data)
             for col in OUTPUT_COLUMNS:
                 if col not in df.columns: df[col] = ""
@@ -465,13 +467,6 @@ if uploaded_files:
 
             st.success("✅ 分析完成！")
             st.dataframe(df)
-
-            # Debug Info
-            with st.expander("🕵️ 偵錯模式 (Debug Mode) - 查看數值來源"):
-                if debug_logs:
-                    st.dataframe(pd.DataFrame(debug_logs))
-                else:
-                    st.info("無抓取紀錄")
 
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:

@@ -57,7 +57,7 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
-# ★ v44.0: 這些是 MSDS 成分表的特徵，看到這些標題的欄位絕對不能抓 ★
+# MSDS 成分表特徵 (看到這些標題的欄位絕對不能抓)
 MSDS_HEADER_KEYWORDS = [
     "content", "composition", "concentration", "含量", "成分"
 ]
@@ -75,25 +75,30 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
-def extract_valid_report_date(text):
+def extract_dates_broad(text):
+    """
+    v45.0: 寬鬆日期提取 (只要像日期就抓)
+    但是會過濾掉包含 'Approved', '承認' 的行
+    """
     lines = text.split('\n')
     valid_dates = []
     
     patterns = [
-        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])",
-        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})",
-        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})",
-        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日"
+        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", # 2025/03/31
+        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", # 31-Mar-2025
+        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", # Mar 31 2025
+        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" # 2025年12月19日
     ]
     
-    # 嚴格日期篩選：只抓 Report Date，排除 Approved Date
-    allow_list = ["date", "issue", "report", "日期"]
-    block_list = ["approved", "approve", "承認", "核准", "檢驗", "expiry"]
+    # 黑名單：只要這行出現這些字，這行的日期就不要
+    block_list = ["approved", "approve", "承認", "核准", "expiry", "valid"]
 
     for line in lines:
         line_lower = line.lower()
-        if any(bad in line_lower for bad in block_list): continue 
-        if not any(good in line_lower for good in allow_list): continue 
+        
+        # 檢查黑名單
+        if any(bad in line_lower for bad in block_list):
+            continue 
 
         for pattern in patterns:
             matches = re.finditer(pattern, line, re.IGNORECASE)
@@ -114,9 +119,7 @@ def extract_valid_report_date(text):
                         valid_dates.append(dt)
                 except: continue
     
-    if valid_dates:
-        return max(valid_dates)
-    return None
+    return valid_dates
 
 def is_suspicious_limit_value(val):
     try:
@@ -164,7 +167,7 @@ def identify_company(text):
     if "cti" in txt or "centre testing" in txt: return "CTI"
     return "OTHERS"
 
-# --- 3. 核心：表格識別 (欄位過濾升級) ---
+# --- 3. 核心：表格識別 ---
 
 def identify_columns_by_company(table, company):
     item_idx = -1
@@ -177,8 +180,7 @@ def identify_columns_by_company(table, company):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
-    # ★ v44.0: 檢查整張表是否為 MSDS 成分表 ★
-    # 如果標題包含 "Composition" 或 "Content" 且沒有 "Result"，視為 MSDS 表
+    # 檢查是否為 MSDS 成分表 (Content/Composition)
     is_msds_table = False
     if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text:
         is_msds_table = True
@@ -196,7 +198,7 @@ def identify_columns_by_company(table, company):
             if "limit" in txt or "限值" in txt:
                 if limit_idx == -1: limit_idx = c_idx
 
-            # ★ v44.0: 嚴格結果欄位判定 - 絕對不能是 Content/含量 ★
+            # 嚴格結果欄位判定 (不可是 Content)
             is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
             
             if not is_bad_header:
@@ -217,7 +219,7 @@ def identify_columns_by_company(table, company):
             result_idx = mdl_idx + 1
     
     is_reference_table = False
-    if is_msds_table: # ★ 優先排除 MSDS 表
+    if is_msds_table: 
         is_reference_table = True
     elif result_idx == -1:
         if "restricted substances" in full_header_text or "group name" in full_header_text or "substance name" in full_header_text:
@@ -229,7 +231,7 @@ def identify_columns_by_company(table, company):
 
     return item_idx, result_idx, is_reference_table
 
-# --- 4. 核心：文字模式 (避開 MSDS 描述) ---
+# --- 4. 核心：文字模式 ---
 
 def parse_text_lines(text, data_pool, file_group_data, filename, company, targets=None):
     lines = text.split('\n')
@@ -237,7 +239,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         line_clean = clean_text(line)
         if not line_clean: continue
         
-        # ★ v44.0: 如果這行包含 "Content", "Composition", "含量"，跳過 ★
+        # 避開 MSDS 關鍵字行
         if any(bad in line_clean.lower() for bad in MSDS_HEADER_KEYWORDS):
             continue
 
@@ -305,9 +307,6 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
-                # 移除所有文件級過濾，因為這會誤殺 SGS 報告
-                # 改用 Table 級別的 Content/含量 過濾
-                
                 file_dates = []
                 full_text_content = "" 
                 first_page_text = ""
@@ -319,9 +318,10 @@ def process_files(files):
                     
                     if p_idx == 0: first_page_text = page_txt
 
+                    # v45.0: 前5頁寬鬆掃描日期
                     if p_idx < 5:
-                        d = extract_valid_report_date(page_txt)
-                        if d: file_dates.append(d)
+                        dates = extract_dates_broad(page_txt)
+                        file_dates.extend(dates)
                 
                 if file_dates:
                      all_dates.append((max(file_dates), filename))
@@ -331,7 +331,7 @@ def process_files(files):
                 if check_pfas_in_summary(first_page_text):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
-                # 2. 引擎 A: 表格模式 (v44 強化: 避開 Content 欄位)
+                # 2. 引擎 A: 表格模式
                 for page in pdf.pages:
                     tables = page.extract_tables()
                     for table in tables:
@@ -356,7 +356,6 @@ def process_files(files):
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # v37.0: 備援掃描
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -387,9 +386,8 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式 (強制救援，但會避開 MSDS 關鍵字行)
+                # 3. 引擎 B: 文字模式
                 missing_targets = []
-                
                 pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
                 if not pb_data: missing_targets.append("Pb")
                 if not file_group_data["PBB"]: missing_targets.append("PBB")
@@ -440,9 +438,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v44.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v44.0 精準欄位版)")
-st.info("💡 v44.0：修正過濾邏輯，不再封鎖檔案，而是針對表格標題進行「Content/含量」過濾，精準區分測試結果與 MSDS 成分表。")
+st.set_page_config(page_title="SGS 報告聚合工具 v45.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v45.0 最終修正版)")
+st.info("💡 v45.0：恢復寬鬆日期抓取 (確保報告日期不遺漏)，並保留對承認日期的智慧過濾；同時精準排除 MSDS 成分表。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -463,7 +461,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v44.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v45.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

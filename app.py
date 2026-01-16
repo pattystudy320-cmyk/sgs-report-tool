@@ -50,7 +50,7 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
-# --- 2. 輔助功能 (v35.1 修復版) ---
+# --- 2. 輔助功能 (v35.3 強化版) ---
 
 def clean_text(text):
     if not text: return ""
@@ -58,15 +58,10 @@ def clean_text(text):
 
 def extract_date_from_text(text):
     text = clean_text(text)
-    # v35.1: 修復日期抓取，新增對 "03 Mar 2023" (空白分隔) 的支援，並針對 "Date:" 標籤優化
     patterns = [
-        # 優先權 1: 明確的 Date: dd Mon yyyy (SGS 常見格式)
-        r"Date\s*[:\.]?\s*(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3})\s+(20\d{2})",
-        # 優先權 2: dd-Mon-yyyy (Intertek 常見)
+        r"Date\s*[:\.]?\s*(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3})\s+(20\d{2})", # Date: 03 Mar 2023
         r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})",
-        # 優先權 3: Mon dd, yyyy
-        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})",
-        # 優先權 4: 標準 yyyy/mm/dd
+        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", # Feb 27, 2025
         r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])"
     ]
     
@@ -77,14 +72,12 @@ def extract_date_from_text(text):
             try:
                 dt = None
                 full_match = match.group(0)
-                # 移除 Date: 前綴，只留日期部分
                 if "date" in full_match.lower():
                     full_match = re.sub(r"Date\s*[:\.]?\s*", "", full_match, flags=re.IGNORECASE)
                 
-                clean_str = re.sub(r"[,./-]", " ", full_match) # 統一分隔符
+                clean_str = re.sub(r"[,./-]", " ", full_match) 
                 clean_str = " ".join(clean_str.split())
                 
-                # 嘗試多種解析格式
                 for fmt in ["%d %b %Y", "%Y %m %d", "%b %d %Y", "%B %d %Y"]:
                     try:
                         dt = datetime.strptime(clean_str, fmt)
@@ -114,15 +107,18 @@ def parse_value_priority(value_str):
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
-    # v35.1: 強制過濾法規字串 (修復 2011/65/EU 問題)
+    if "iec" in val_lower or "iso" in val_lower or "epa" in val_lower: return (0, 0, "")
+    if ":" in val: return (0, 0, "")
+    
     if "eu" in val_lower or "directive" in val_lower or "annex" in val_lower or "/" in val_lower:
-        # 除非是 N.D./N.A. 否則有斜線通常是雜訊
         if "n.d" not in val_lower and "n/a" not in val_lower:
             return (0, 0, "")
 
-    ignore_list = ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits", "requirement", "conclusion", "pass", "fail"]
+    ignore_list = ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits", "requirement", "conclusion", "pass", "fail", "reference", "determination"]
     if val_lower in ignore_list: return (0, 0, "")
+    
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
+    if re.search(r"\d{4,}-\d+", val): return (0, 0, "")
     
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower: return (1, 0, "N.D.")
     if "negative" in val_lower or "陰性" in val_lower: return (2, 0, "NEGATIVE")
@@ -135,6 +131,8 @@ def parse_value_priority(value_str):
     if num_match:
         try:
             number = float(num_match.group(1))
+            if number > 3000 and number != 2011 and number != 2015: 
+                 if "-" in val or ":" in val: return (0, 0, "")
             full_str = val 
             return (3, number, full_str)
         except: pass
@@ -161,7 +159,7 @@ def identify_columns_by_company(table, company):
     item_idx = -1
     result_idx = -1
     
-    max_scan_rows = min(4, len(table))
+    max_scan_rows = min(5, len(table))
     
     for r in range(max_scan_rows):
         row = table[r]
@@ -177,15 +175,8 @@ def identify_columns_by_company(table, company):
             if not txt: continue
             if "limit" in txt or "mdl" in txt or "rl" in txt or "unit" in txt or "method" in txt or "cas" in txt: continue
 
-            if company == "SGS":
-                if "result" in txt or "結果" in txt or re.search(r"\b(no\.|00[1-9])", txt):
-                     if result_idx == -1: result_idx = c_idx
-            elif company == "INTERTEK":
-                if "result" in txt or "claimed" in txt:
-                     if result_idx == -1: result_idx = c_idx
-            else:
-                if "result" in txt or "結果" in txt:
-                     if result_idx == -1: result_idx = c_idx
+            if "result" in txt or "結果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "claimed" in txt:
+                 if result_idx == -1: result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     if result_idx == -1 and len(table[0]) > 2: result_idx = len(table[0]) - 1
@@ -200,13 +191,17 @@ def parse_text_lines(text, data_pool, file_group_data, filename):
         line_clean = clean_text(line)
         if not line_clean: continue
         
-        # v35.1: 文字模式也要過濾法規標題行
-        if "directive" in line_clean.lower() and "2011/65" in line_clean: continue
+        line_lower = line_clean.lower()
+        if "test method" in line_lower or "reference to" in line_lower or "determination of" in line_lower: continue
+        if "directive" in line_lower and "2011/65" in line_lower: continue
+        
+        # v35.3: 偵測該行是否有 N.D.，用於後續過濾雜訊數值
+        row_has_nd = "nd" in line_lower or "n.d." in line_lower or "not detected" in line_lower
 
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
             for kw in keywords:
-                if kw in line_clean and "test item" not in line_clean.lower():
+                if kw in line_clean and "test item" not in line_lower:
                     matched_simple = key
                     break
             if matched_simple: break
@@ -229,6 +224,14 @@ def parse_text_lines(text, data_pool, file_group_data, filename):
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "uqt", "loq", "mdl", "---", "-"]: continue
                 priority = parse_value_priority(part)
+                
+                # v35.3: N.D. 保護機制
+                # 如果該行明明有 N.D.，但我們卻抓到了一個大於1000的整數 (例如 6476)，那這個整數肯定是雜訊 (標準號/批號)
+                if row_has_nd and priority[0] == 3:
+                     val_num = priority[1]
+                     if val_num > 1000 and val_num.is_integer():
+                         continue # 跳過這個數值，繼續找下一個 (通常就是 N.D.)
+
                 if priority[0] > 0:
                     found_val = part
                     break
@@ -246,9 +249,7 @@ def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     all_dates = []
     
-    global_tracker = {
-        "Pb": {"max_score": -1, "max_value": -1.0, "filename": ""}
-    }
+    global_tracker = {key: {"max_score": -1, "max_value": -1.0, "filename": ""} for key in SIMPLE_KEYWORDS.keys()}
     
     progress_bar = st.progress(0)
     
@@ -261,7 +262,6 @@ def process_files(files):
                 file_dates = []
                 full_text_content = "" 
                 
-                # 1. 提取日期與公司
                 for p_idx, page in enumerate(pdf.pages):
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
@@ -275,7 +275,7 @@ def process_files(files):
                 if check_pfas_in_summary(full_text_content[:2000]):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
-                # 2. 引擎 A: 表格模式
+                # 表格模式
                 has_table_data = False
                 for page in pdf.pages:
                     tables = page.extract_tables()
@@ -283,22 +283,22 @@ def process_files(files):
                         if not table or len(table) < 2: continue
                         
                         item_idx, result_idx = identify_columns_by_company(table, company)
-                        if result_idx == -1: continue
+                        if item_idx == -1: continue 
 
                         for row in table:
                             clean_row = [clean_text(cell) for cell in row]
                             if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
                             
                             item_name = clean_row[item_idx]
-                            
-                            # v35.1: 關鍵過濾 - 如果這一行看起來像法規標題，直接跳過
                             item_name_lower = item_name.lower()
-                            if "directive" in item_name_lower or "annex" in item_name_lower or "2011/65" in item_name_lower:
-                                continue
-                            if "test item" in item_name_lower or "result" in item_name_lower: continue
+                            if "test item" in item_name_lower or "result" in item_name_lower or "directive" in item_name_lower: continue
                             
+                            # v35.3: 表格行也要檢查是否有 N.D. 
+                            row_txt = " ".join(clean_row).lower()
+                            row_has_nd = "nd" in row_txt or "n.d." in row_txt or "not detected" in row_txt
+
                             result_cell = ""
-                            if result_idx < len(clean_row):
+                            if result_idx != -1 and result_idx < len(clean_row):
                                 result_cell = clean_row[result_idx]
                             
                             if not result_cell:
@@ -306,8 +306,18 @@ def process_files(files):
                                     if "n.d." in cell.lower() or "not detected" in cell.lower():
                                         result_cell = cell
                                         break
+                                    if re.match(r"^\d+(\.\d+)?$", clean_text(cell)) and not is_suspicious_limit_value(cell):
+                                         result_cell = cell
 
                             priority = parse_value_priority(result_cell)
+                            
+                            # v35.3: 表格模式的 N.D. 保護機制
+                            if row_has_nd and priority[0] == 3:
+                                 val_num = priority[1]
+                                 if val_num > 1000 and val_num.is_integer():
+                                     # 數值太大且有 N.D.，極有可能是誤抓，強制改回 N.D.
+                                     priority = (1, 0, "N.D.")
+
                             if priority[0] == 0: continue
                             
                             has_table_data = True
@@ -319,15 +329,14 @@ def process_files(files):
                                         
                                         data_pool[target_key].append({"priority": priority, "filename": filename})
                                         
-                                        if target_key == "Pb":
-                                            score, val, _ = priority
-                                            if score > global_tracker["Pb"]["max_score"]:
-                                                global_tracker["Pb"]["max_score"] = score
-                                                global_tracker["Pb"]["max_value"] = val
-                                                global_tracker["Pb"]["filename"] = filename
-                                            elif score == global_tracker["Pb"]["max_score"] and val > global_tracker["Pb"]["max_value"]:
-                                                global_tracker["Pb"]["max_value"] = val
-                                                global_tracker["Pb"]["filename"] = filename
+                                        score, val, _ = priority
+                                        if score > global_tracker[target_key]["max_score"]:
+                                            global_tracker[target_key]["max_score"] = score
+                                            global_tracker[target_key]["max_value"] = val
+                                            global_tracker[target_key]["filename"] = filename
+                                        elif score == global_tracker[target_key]["max_score"] and val > global_tracker[target_key]["max_value"]:
+                                            global_tracker[target_key]["max_value"] = val
+                                            global_tracker[target_key]["filename"] = filename
                                         break
                             
                             for group_key, keywords in GROUP_KEYWORDS.items():
@@ -336,21 +345,20 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式
-                pb_found_in_file = any(d['filename'] == filename for d in data_pool["Pb"])
-                if not pb_found_in_file or (company == "SGS" and not has_table_data):
-                    parse_text_lines(full_text_content, data_pool, file_group_data, filename)
-                    
-                    for d in data_pool["Pb"]:
-                         if d['filename'] == filename:
-                             p = d['priority']
-                             if p[0] > global_tracker["Pb"]["max_score"]:
-                                 global_tracker["Pb"]["max_score"] = p[0]
-                                 global_tracker["Pb"]["max_value"] = p[1]
-                                 global_tracker["Pb"]["filename"] = filename
-                             elif p[0] == global_tracker["Pb"]["max_score"] and p[1] > global_tracker["Pb"]["max_value"]:
-                                 global_tracker["Pb"]["max_value"] = p[1]
-                                 global_tracker["Pb"]["filename"] = filename
+                # 文字模式
+                parse_text_lines(full_text_content, data_pool, file_group_data, filename)
+                
+                # 更新全局 Tracker
+                for d in data_pool["Pb"]:
+                     if d['filename'] == filename:
+                         p = d['priority']
+                         if p[0] > global_tracker["Pb"]["max_score"]:
+                             global_tracker["Pb"]["max_score"] = p[0]
+                             global_tracker["Pb"]["max_value"] = p[1]
+                             global_tracker["Pb"]["filename"] = filename
+                         elif p[0] == global_tracker["Pb"]["max_score"] and p[1] > global_tracker["Pb"]["max_value"]:
+                             global_tracker["Pb"]["max_value"] = p[1]
+                             global_tracker["Pb"]["filename"] = filename
 
             for group_key, values in file_group_data.items():
                 if values:
@@ -392,9 +400,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/Intertek 報告聚合工具 v35.1", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v35.1 修復版)")
-st.error("🛠️ v35.1 修復：解決 SGS 日期為空、Pb 誤抓法規編號 (2011/65/EU) 的問題。")
+st.set_page_config(page_title="SGS/Intertek 報告聚合工具 v35.3", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v35.3 修正版)")
+st.error("🛠️ v35.3：修正 BBP 等項目誤抓雜訊數值 (如 6476) 而非 N.D. 的問題。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

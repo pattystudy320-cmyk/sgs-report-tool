@@ -57,15 +57,13 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
-# ★ v38.0 新增：非檢測報告 (MSDS/承認書) 拒絕清單 ★
+# ★ v39.0 修正：精簡拒絕清單，避免誤殺正常報告 ★
 NON_REPORT_KEYWORDS = [
-    "material safety data sheet",
-    "safety data sheet",
-    "msds",
-    "sds",
-    "specification approval",
+    # 只過濾明確的非報告標題
+    "specification approval", # 承認書
     "承認書",
-    "declaration of conformity"
+    "material safety data sheet", # MSDS 標題
+    # 移除 "sds", "declaration of conformity" 等可能出現在附註的詞
 ]
 
 OUTPUT_COLUMNS = [
@@ -83,12 +81,12 @@ def clean_text(text):
 
 def is_valid_test_report_file(first_page_text):
     """
-    v38.0: 檢查第一頁是否包含 MSDS 或 承認書 的關鍵字
+    v39.0: 僅當第一頁出現明確的「承認書」或「MSDS」標題時才跳過
     """
     txt_lower = first_page_text.lower()
     for kw in NON_REPORT_KEYWORDS:
         if kw in txt_lower:
-            return False # 發現違禁字，判定為非報告
+            return False 
     return True
 
 def extract_valid_report_date(text):
@@ -305,10 +303,8 @@ def process_files(files):
                 if len(pdf.pages) > 0:
                     first_page_text = pdf.pages[0].extract_text() or ""
                 
-                # ★ v38.0: 如果不是 Test Report，直接跳過 ★
+                # ★ v39.0: 僅過濾承認書，放行 SGS 報告 ★
                 if not is_valid_test_report_file(first_page_text):
-                    # st.warning(f"跳過非檢測報告檔案: {filename}") 
-                    # 選擇性顯示警告，以免干擾版面
                     continue 
 
                 file_dates = []
@@ -433,9 +429,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v38.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v38.0)")
-st.info("💡 v38.0：新增檔案過濾機制，自動跳過 MSDS、承認書等非檢測報告檔案。")
+st.set_page_config(page_title="SGS 報告聚合工具 v39.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v39.0)")
+st.info("💡 v39.0：放寬報告過濾條件，只封鎖「承認書」和「MSDS」，確保正常 SGS/Intertek 報告能通過。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -456,7 +452,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v38.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v39.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

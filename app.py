@@ -57,15 +57,6 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
-# ★ v39.0 修正：精簡拒絕清單，避免誤殺正常報告 ★
-NON_REPORT_KEYWORDS = [
-    # 只過濾明確的非報告標題
-    "specification approval", # 承認書
-    "承認書",
-    "material safety data sheet", # MSDS 標題
-    # 移除 "sds", "declaration of conformity" 等可能出現在附註的詞
-]
-
 OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
@@ -79,40 +70,38 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
-def is_valid_test_report_file(first_page_text):
+def extract_dates_with_context(text):
     """
-    v39.0: 僅當第一頁出現明確的「承認書」或「MSDS」標題時才跳過
+    v35.0: 提取日期並給予權重。
+    High (2): Date, Issue, Report, 日期
+    Low (1): Approved, 承認, 核准 (通常是文件生效日，非測試日)
     """
-    txt_lower = first_page_text.lower()
-    for kw in NON_REPORT_KEYWORDS:
-        if kw in txt_lower:
-            return False 
-    return True
-
-def extract_valid_report_date(text):
+    candidates = []
     lines = text.split('\n')
-    valid_dates = []
     
+    # 支援格式
     patterns = [
-        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])",
-        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})",
-        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})",
-        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日"
+        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", # 2025/03/31
+        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", # 31-Mar-2025
+        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", # Mar 31 2025
+        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" # 2025年12月19日
     ]
-    
-    allow_list = ["date", "issue", "report", "日期"]
-    block_list = ["approved", "approve", "承認", "核准", "檢驗", "expiry"]
 
     for line in lines:
-        line_lower = line.lower()
-        if any(bad in line_lower for bad in block_list): continue 
-        if not any(good in line_lower for good in allow_list): continue 
+        # 判斷權重
+        weight = 2 # 預設一般
+        lower_line = line.lower()
+        if "approv" in lower_line or "承認" in lower_line or "核准" in lower_line:
+            weight = 1 # 承認書日期，權重降低
+        elif "date:" in lower_line or "issue" in lower_line or "report" in lower_line or "日期" in lower_line:
+            weight = 3 # 明確的報告日期，權重最高
 
         for pattern in patterns:
             matches = re.finditer(pattern, line, re.IGNORECASE)
             for match in matches:
                 try:
                     full_match = match.group(0)
+                    # 清洗字串
                     clean_str = full_match.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
                     clean_str = " ".join(clean_str.split())
                     
@@ -124,12 +113,10 @@ def extract_valid_report_date(text):
                         except: continue
                     
                     if dt and 2000 <= dt.year <= 2030:
-                        valid_dates.append(dt)
+                        candidates.append((weight, dt))
                 except: continue
     
-    if valid_dates:
-        return max(valid_dates)
-    return None
+    return candidates
 
 def is_suspicious_limit_value(val):
     try:
@@ -159,7 +146,7 @@ def parse_value_priority(value_str):
     if num_match:
         try:
             number = float(num_match.group(1))
-            return (3, number, val)
+            return (3, number, num_match.group(1))
         except: pass
             
     return (0, 0, val)
@@ -271,7 +258,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company):
                     val_check = part.replace("▲", "").replace("△", "")
                     try:
                         f = float(val_check)
-                        if f not in [100.0, 1000.0, 50.0, 25.0, 20.0, 10.0, 5.0, 2.0]:
+                        if f not in [100.0, 1000.0, 50.0]:
                             found_val = part
                             break
                     except: pass
@@ -298,33 +285,33 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
-                # 1. 守門員檢查
-                first_page_text = ""
-                if len(pdf.pages) > 0:
-                    first_page_text = pdf.pages[0].extract_text() or ""
-                
-                # ★ v39.0: 僅過濾承認書，放行 SGS 報告 ★
-                if not is_valid_test_report_file(first_page_text):
-                    continue 
-
-                file_dates = []
+                file_dates_candidates = []
+                first_few_pages_text = ""
                 full_text_content = "" 
                 
+                # v35.0: 擴大掃描到前 5 頁，避免承認書蓋掉報告
                 for p_idx in range(len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     
                     if p_idx < 5:
-                        d = extract_valid_report_date(page_txt)
-                        if d: file_dates.append(d)
+                        first_few_pages_text += page_txt
+                        # 收集所有日期候選人 (權重, 日期)
+                        candidates = extract_dates_with_context(page_txt)
+                        file_dates_candidates.extend(candidates)
                 
-                if file_dates:
-                     all_dates.append((max(file_dates), filename))
+                # 日期決策：優先選權重高的，若權重相同選日期新的
+                if file_dates_candidates:
+                    # 排序: 權重(大到小) -> 日期(大到小)
+                    # 這樣會優先選 "Report Date 2025/03/31" (權重3) 
+                    # 而不是 "Approved Date 2025/12/19" (權重1)
+                    best_date_tuple = sorted(file_dates_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                    all_dates.append((best_date_tuple[1], filename))
                 
-                company = identify_company(first_page_text)
+                company = identify_company(first_few_pages_text)
                 
-                if check_pfas_in_summary(first_page_text):
+                if check_pfas_in_summary(first_few_pages_text):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
                 # 2. 引擎 A: 表格模式
@@ -360,9 +347,7 @@ def process_files(files):
                                         result = cell
                                         break
                                     if re.search(r"^\d+(\.\d+)?", cell):
-                                        try:
-                                            if float(cell) in [1000, 100, 50, 25, 20, 10, 5, 2]: continue
-                                        except: pass
+                                        if float(cell) in [1000, 100, 50]: continue 
                                         result = cell
                                         break
                             
@@ -414,11 +399,13 @@ def process_files(files):
 
     final_date_str = ""
     if all_dates:
+        # 這裡 all_dates 已經是篩選過權重最高的日期了
         latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
         final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
     
     final_row["日期"] = final_date_str
     
+    # 找 Pb 來源
     pb_candidates = data_pool.get("Pb", [])
     if pb_candidates:
         best_pb = sorted(pb_candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
@@ -429,9 +416,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v39.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v39.0)")
-st.info("💡 v39.0：放寬報告過濾條件，只封鎖「承認書」和「MSDS」，確保正常 SGS/Intertek 報告能通過。")
+st.set_page_config(page_title="SGS 報告聚合工具 v35.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v35.0)")
+st.info("💡 v35.0：新增日期權重邏輯，優先抓取「測試日期」而非「核准/承認日期」，解決承認書覆蓋問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -452,7 +439,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v39.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v35.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

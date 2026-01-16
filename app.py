@@ -75,34 +75,33 @@ def clean_text(text):
     return str(text).replace('\n', ' ').strip()
 
 def find_report_start_page(pdf):
-    """
-    v50.0: 智慧導航
-    掃描前 10 頁，尋找 "Test Report" 或 "測試報告" 的起始頁。
-    目的是跳過前面的承認書 (Approval Sheet) 或封面。
-    """
     for i in range(min(10, len(pdf.pages))):
         text = (pdf.pages[i].extract_text() or "").lower()
-        # 關鍵詞：必須包含 Test Report 且看起來像標題
         if "test report" in text or "測試報告" in text:
-            # 排除只是在內文中提到 test report 的情況 (簡單判斷: 通常標題字少，但這裡先寬鬆)
             return i
-    return 0 # 找不到就從第 0 頁開始
+    return 0
 
 def extract_labeled_report_date(text):
+    """
+    v51.0: 黏合式正則表達式 (Bonding Regex)
+    解決標籤與日期之間有大量空白的問題。
+    例如: "Date:       05-Feb-2024"
+    """
     lines = text.split('\n')
     valid_dates = []
     
-    # 支援格式 (含 CTIC 常用的 Mar. 31, 2025)
-    patterns = [
-        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", # 2025/03/31
-        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", # 31-Mar-2025
-        r"([a-zA-Z]{3,})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", # Mar. 31, 2025
-        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" # 中文
+    # 複合模式：標籤 + 任意空白 + 日期
+    # 標籤群組: (Date|Issue|Report|...)\s*[:：]?
+    label_pattern = r"(?:Date|Dated|Issue|Report|日期)\s*[:：]?\s+"
+    
+    # 日期群組
+    date_patterns = [
+        r"(?P<d1>20\d{2}[/\.-](?:0?[1-9]|1[0-2])[/\.-](?:0?[1-9]|[12][0-9]|3[01]))", # YYYY/MM/DD
+        r"(?P<d2>(?:0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*[a-zA-Z]{3}\s*[-/]\s*20\d{2})", # DD-Mon-YYYY (05-Feb-2024)
+        r"(?P<d3>[a-zA-Z]{3,}\.?\s+(?:0?[1-9]|[12][0-9]|3[01])[,\s]+\s*20\d{2})", # Mon DD, YYYY
+        r"(?P<d4>20\d{2}\s*年\s*(?:0?[1-9]|1[0-2])\s*月\s*(?:0?[1-9]|[12][0-9]|3[01])\s*日)" # 中文
     ]
-    
-    # 必須包含的標籤 (Label)
-    must_have_kw = ["date", "dated", "issue", "report", "日期", "time"]
-    
+
     # 黑名單
     block_kw = [
         "approve", "approved", "approval", 
@@ -114,26 +113,37 @@ def extract_labeled_report_date(text):
 
     for line in lines:
         line_lower = line.lower()
-        if any(bad in line_lower for bad in block_kw): continue 
-        if not any(good in line_lower for good in must_have_kw): continue
+        
+        # 1. 絕對過濾：有批准字眼就跳過
+        if any(bad in line_lower for bad in block_kw):
+            continue 
 
-        for pattern in patterns:
-            matches = re.finditer(pattern, line, re.IGNORECASE)
+        # 2. 匹配 "標籤 + 空白 + 日期"
+        for d_pat in date_patterns:
+            # 組合正則：Label + Spaces + Date
+            full_pattern = label_pattern + d_pat
+            matches = re.finditer(full_pattern, line, re.IGNORECASE)
+            
             for match in matches:
                 try:
-                    full_match = match.group(0)
-                    clean_str = full_match.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
-                    clean_str = " ".join(clean_str.split())
+                    # 抓出日期部分 (group 1 是整個日期字串)
+                    # 因為 pattern 裡有 group，finditer 會回傳 group
+                    # 我們需要從 match object 裡找具體的日期 group (d1, d2, d3, d4)
+                    date_str = match.group('d1') or match.group('d2') or match.group('d3') or match.group('d4')
                     
-                    # 嘗試解析月份英文 (Jan, Feb, March...)
-                    dt = None
-                    for fmt in ["%Y %m %d", "%d %b %Y", "%b %d %Y", "%B %d %Y"]: # %B for full month name
-                        try:
-                            dt = datetime.strptime(clean_str, fmt)
-                            if 2000 <= dt.year <= 2030:
-                                valid_dates.append(dt)
-                                break
-                        except: continue
+                    if date_str:
+                        clean_str = date_str.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
+                        clean_str = " ".join(clean_str.split())
+                        
+                        dt = None
+                        # 嘗試解析
+                        for fmt in ["%Y %m %d", "%d %b %Y", "%b %d %Y", "%B %d %Y"]:
+                            try:
+                                dt = datetime.strptime(clean_str, fmt)
+                                if 2000 <= dt.year <= 2030:
+                                    valid_dates.append(dt)
+                                    break
+                            except: continue
                 except: continue
     
     if valid_dates:
@@ -184,7 +194,7 @@ def identify_company(text):
     if "sgs" in txt: return "SGS"
     if "intertek" in txt: return "INTERTEK"
     if "cti" in txt or "centre testing" in txt: return "CTI"
-    if "ctic" in txt: return "CTIC" # v50.0 新增
+    if "ctic" in txt: return "CTIC"
     return "OTHERS"
 
 # --- 3. 核心：表格識別 ---
@@ -200,7 +210,6 @@ def identify_columns_by_company(table, company):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
-    # MSDS 過濾
     is_msds_table = False
     if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text:
         is_msds_table = True
@@ -221,7 +230,7 @@ def identify_columns_by_company(table, company):
             is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
             
             if not is_bad_header:
-                # 通用邏輯 (含 CTIC)
+                # 通用邏輯
                 if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
                     re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
@@ -316,10 +325,8 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
-                # 1. 智慧導航：尋找真正的報告起始頁
                 start_page_idx = find_report_start_page(pdf)
                 
-                # 抓取公司名稱 (用起始頁判斷)
                 if len(pdf.pages) > start_page_idx:
                     first_relevant_page_text = pdf.pages[start_page_idx].extract_text() or ""
                     company = identify_company(first_relevant_page_text)
@@ -331,13 +338,11 @@ def process_files(files):
                 file_dates = []
                 full_text_content = "" 
                 
-                # 從起始頁開始處理，跳過前面的承認書
                 for p_idx in range(start_page_idx, len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     
-                    # 只在報告的前 5 頁 (相對於 start_page) 找日期
                     if p_idx < start_page_idx + 5:
                         d = extract_labeled_report_date(page_txt)
                         if d: file_dates.append(d)
@@ -453,9 +458,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v50.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v50.0 智慧導航版)")
-st.info("💡 v50.0：新增智慧導航功能，自動跳過文件前段的承認書/封面，直接定位到 Test Report 起始頁，徹底解決日期誤判與 CTIC/SGS 混搭問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v51.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v51.0 完美日期版)")
+st.info("💡 v51.0：引入「強力膠」日期解析，能處理 Date: 與日期之間的超長空白，並嚴格排除承認/Approved 日期。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -476,7 +481,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v50.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v51.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

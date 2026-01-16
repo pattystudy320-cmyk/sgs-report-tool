@@ -70,14 +70,14 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
-def extract_dates_with_context(text):
+def extract_valid_report_date(text):
     """
-    v35.0: 提取日期並給予權重。
-    High (2): Date, Issue, Report, 日期
-    Low (1): Approved, 承認, 核准 (通常是文件生效日，非測試日)
+    v36.0: 嚴格日期提取
+    1. 白名單: 必須包含 Date, Issue, Report, 日期
+    2. 黑名單: 絕對不可包含 Approved, 承認, 核准, 檢驗 (避免抓到承認書日期)
     """
-    candidates = []
     lines = text.split('\n')
+    valid_dates = []
     
     # 支援格式
     patterns = [
@@ -86,22 +86,28 @@ def extract_dates_with_context(text):
         r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", # Mar 31 2025
         r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" # 2025年12月19日
     ]
+    
+    # ★ 關鍵：定義白名單與黑名單 ★
+    allow_list = ["date", "issue", "report", "日期"]
+    block_list = ["approved", "approve", "承認", "核准", "檢驗", "expiry"]
 
     for line in lines:
-        # 判斷權重
-        weight = 2 # 預設一般
-        lower_line = line.lower()
-        if "approv" in lower_line or "承認" in lower_line or "核准" in lower_line:
-            weight = 1 # 承認書日期，權重降低
-        elif "date:" in lower_line or "issue" in lower_line or "report" in lower_line or "日期" in lower_line:
-            weight = 3 # 明確的報告日期，權重最高
+        line_lower = line.lower()
+        
+        # 1. 檢查黑名單 (優先排除)
+        if any(bad in line_lower for bad in block_list):
+            continue # 跳過此行
+            
+        # 2. 檢查白名單 (必須包含)
+        if not any(good in line_lower for good in allow_list):
+            continue # 跳過此行
 
+        # 3. 提取日期
         for pattern in patterns:
             matches = re.finditer(pattern, line, re.IGNORECASE)
             for match in matches:
                 try:
                     full_match = match.group(0)
-                    # 清洗字串
                     clean_str = full_match.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
                     clean_str = " ".join(clean_str.split())
                     
@@ -113,10 +119,12 @@ def extract_dates_with_context(text):
                         except: continue
                     
                     if dt and 2000 <= dt.year <= 2030:
-                        candidates.append((weight, dt))
+                        valid_dates.append(dt)
                 except: continue
     
-    return candidates
+    if valid_dates:
+        return max(valid_dates) # 回傳符合條件中最晚的日期
+    return None
 
 def is_suspicious_limit_value(val):
     try:
@@ -285,29 +293,25 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
-                file_dates_candidates = []
+                file_dates = []
                 first_few_pages_text = ""
                 full_text_content = "" 
                 
-                # v35.0: 擴大掃描到前 5 頁，避免承認書蓋掉報告
+                # 擴大掃描到前 5 頁，避免承認書蓋掉報告
                 for p_idx in range(len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     
+                    # 只在前 5 頁找日期
                     if p_idx < 5:
                         first_few_pages_text += page_txt
-                        # 收集所有日期候選人 (權重, 日期)
-                        candidates = extract_dates_with_context(page_txt)
-                        file_dates_candidates.extend(candidates)
                 
-                # 日期決策：優先選權重高的，若權重相同選日期新的
-                if file_dates_candidates:
-                    # 排序: 權重(大到小) -> 日期(大到小)
-                    # 這樣會優先選 "Report Date 2025/03/31" (權重3) 
-                    # 而不是 "Approved Date 2025/12/19" (權重1)
-                    best_date_tuple = sorted(file_dates_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
-                    all_dates.append((best_date_tuple[1], filename))
+                # ★ v36.0: 嚴格過濾日期 ★
+                # 從前 5 頁的文字中，提取符合條件的日期
+                d = extract_valid_report_date(first_few_pages_text)
+                if d: 
+                    all_dates.append((d, filename))
                 
                 company = identify_company(first_few_pages_text)
                 
@@ -398,14 +402,14 @@ def process_files(files):
         final_row[key] = best_record['priority'][2]
 
     final_date_str = ""
+    # v36.0: 選取所有檔案中最晚的「報告日期」
     if all_dates:
-        # 這裡 all_dates 已經是篩選過權重最高的日期了
         latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
         final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
     
     final_row["日期"] = final_date_str
     
-    # 找 Pb 來源
+    # 找 Pb 來源 (最大值優先)
     pb_candidates = data_pool.get("Pb", [])
     if pb_candidates:
         best_pb = sorted(pb_candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
@@ -416,9 +420,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v35.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v35.0)")
-st.info("💡 v35.0：新增日期權重邏輯，優先抓取「測試日期」而非「核准/承認日期」，解決承認書覆蓋問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v36.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v36.0 嚴格日期版)")
+st.info("💡 v36.0：啟動嚴格日期過濾，完全封鎖「Approved/承認」日期，僅抓取「Date/Issue/Report」日期。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -439,7 +443,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v35.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v36.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

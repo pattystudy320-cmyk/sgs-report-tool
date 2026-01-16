@@ -81,55 +81,58 @@ def find_report_start_page(pdf):
             return i
     return 0
 
-def extract_dates_final(text):
+def extract_dates_scoring_system(text):
     """
-    v54.0: 終極過濾版
-    嚴格排除 "Testing Period", "Received Date", "Approved Date"
-    只保留純淨的報告日期。
+    v55.0: 積分權重制 (Scoring System)
+    不依賴強制標籤，而是給予每個找到的日期分數。
+    +100: Report Date, Issue Date, Date:
+    -100: Received, Period, Started, Approved
+    +1:   純日期 (Neutral)
     """
     lines = text.split('\n')
-    valid_dates = [] 
+    candidates = [] # (score, date_object)
     
     patterns = [
         # 2025/01/08, 2025-01-08
         r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", 
         # 05-Feb-2024 (SGS)
         r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", 
-        # Jan. 08, 2025 (CTI)
-        r"([a-zA-Z]{3,})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})",
+        # Jan. 08, 2025 (CTI) - 允許點和逗號
+        r"([a-zA-Z]{3,})\.?\s+(0?[1-9]|[12][0-9]|3[01])(?:st|nd|rd|th)?[\,\s]+\s*(20\d{2})",
         # 08 Jan, 2025 (Intertek)
         r"(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3,})\,?\s+(20\d{2})",
         # 中文
         r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" 
     ]
     
-    high_priority_kw = ["report date", "issue date", "date:", "日期:"]
-    
-    # ★ v54.0 關鍵修正：加入 "period", "started", "received" 到黑名單 ★
-    block_kw = [
+    # 加分項
+    bonus_kw = ["report date", "issue date", "date:", "日期:", "dated"]
+    # 扣分項 (毒藥)
+    poison_kw = [
         "approve", "approved", "approval", "approver", 
         "check", "checked", "review", "reviewed",      
-        "receive", "received", "receipt", # 排除收件日             
-        "period", "duration", "started", "from", "to ", # 排除測試期間 (Testing Period: xxx to xxx)
+        "receive", "received", "receipt",
+        "period", "testing period", "started", "from", "to ", # 測試期間
         "承認", "核准", "檢驗", "收件", "有效", "expiry", "valid", "期間"
     ]
 
     for line in lines:
         line_lower = line.lower()
         
-        # 1. 黑名單檢查 (只要有 Period/Received 就跳過)
-        if any(bad in line_lower for bad in block_kw):
-            continue 
+        # 計算該行分數
+        score = 1 # 預設普通分
+        if any(bad in line_lower for bad in poison_kw):
+            score = -100 # 毒藥行
+        elif any(good in line_lower for good in bonus_kw):
+            score = 100 # 黃金行
 
-        priority = 1
-        if any(good in line_lower for good in high_priority_kw):
-            priority = 2 
-
+        # 提取日期
         for pattern in patterns:
             matches = re.finditer(pattern, line, re.IGNORECASE)
             for match in matches:
                 try:
                     full_match = match.group(0)
+                    # 清洗字串: 移除逗號、點、多餘空白
                     clean_str = full_match.replace(",", " ").replace(".", " ").replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
                     clean_str = " ".join(clean_str.split())
                     
@@ -138,7 +141,7 @@ def extract_dates_final(text):
                         "%Y %m %d", 
                         "%d %b %Y", 
                         "%b %d %Y", 
-                        "%B %d %Y", 
+                        "%B %d %Y", # Full month name (January)
                         "%d %B %Y"
                     ]
                     
@@ -146,13 +149,12 @@ def extract_dates_final(text):
                         try:
                             dt = datetime.strptime(clean_str, fmt)
                             if 2000 <= dt.year <= 2030:
-                                valid_dates.append((priority, dt))
+                                candidates.append((score, dt))
                                 break
                         except: continue
-                    if dt: break
                 except: continue
     
-    return valid_dates
+    return candidates
 
 def is_suspicious_limit_value(val):
     try:
@@ -234,11 +236,13 @@ def identify_columns_by_company(table, company):
             is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
             
             if not is_bad_header:
+                # 通用邏輯
                 if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
                     re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
 
+    # SGS/CTIC 智慧推斷
     if result_idx == -1 and (company == "SGS" or company == "CTIC"):
         if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
             result_idx = mdl_idx + 1
@@ -317,7 +321,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
-    all_dates = [] 
+    all_file_valid_dates = [] # 儲存所有檔案的候選日期 (Score, Date)
     
     progress_bar = st.progress(0)
     
@@ -329,15 +333,16 @@ def process_files(files):
             with pdfplumber.open(file) as pdf:
                 start_page_idx = find_report_start_page(pdf)
                 
+                # 判斷公司
+                company = "OTHERS"
                 if len(pdf.pages) > start_page_idx:
                     first_relevant_page_text = pdf.pages[start_page_idx].extract_text() or ""
                     company = identify_company(first_relevant_page_text)
                     if check_pfas_in_summary(first_relevant_page_text):
                         data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
-                else:
-                    company = "OTHERS"
 
-                file_valid_dates = []
+                # v55.0: 日期提取 - 收集每個檔案的日期候選人
+                file_dates_candidates = []
                 full_text_content = "" 
                 
                 for p_idx in range(start_page_idx, len(pdf.pages)):
@@ -346,15 +351,18 @@ def process_files(files):
                     full_text_content += page_txt + "\n"
                     
                     if p_idx < start_page_idx + 5:
-                        dates = extract_dates_final(page_txt)
-                        file_valid_dates.extend(dates)
+                        dates = extract_dates_scoring_system(page_txt)
+                        file_dates_candidates.extend(dates)
                 
-                if file_valid_dates:
-                    # 排序：Priority DESC, Date DESC
-                    best = sorted(file_valid_dates, key=lambda x: (x[0], x[1]), reverse=True)[0]
-                    all_dates.append(best[1])
+                # 每個檔案選出一個「最佳日期」加入大池子
+                if file_dates_candidates:
+                    # 排序: 分數高優先 -> 日期晚優先
+                    best_date = sorted(file_dates_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                    # 只有正分的日期才算有效日期 (排除 Testing Period)
+                    if best_date[0] > -50:
+                        all_file_valid_dates.append(best_date[1])
 
-                # 2. 引擎 A: 表格模式
+                # 2. 引擎 A
                 for p_idx in range(start_page_idx, len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     tables = page.extract_tables()
@@ -410,7 +418,7 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式
+                # 3. 引擎 B
                 missing_targets = []
                 pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
                 if not pb_data: missing_targets.append("Pb")
@@ -445,9 +453,10 @@ def process_files(files):
         best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
         final_row[key] = best_record['priority'][2]
 
+    # 日期：取所有檔案中選出的「最佳日期」裡最晚的一個
     final_date_str = ""
-    if all_dates:
-        latest_date = max(all_dates)
+    if all_file_valid_dates:
+        latest_date = max(all_file_valid_dates)
         final_date_str = latest_date.strftime("%Y/%m/%d")
     
     final_row["日期"] = final_date_str
@@ -462,9 +471,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v54.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v54.0 日期淨化版)")
-st.info("💡 v54.0：嚴格排除 Testing Period (測試期間) 日期，確保只抓取 Report Date (發行日期)，並維持對 CTI/Intertek/SGS 多種格式的支援。")
+st.set_page_config(page_title="SGS 報告聚合工具 v55.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v55.0 積分日期版)")
+st.info("💡 v55.0：採用「積分權重制」抓取日期，完美支援 CTI/Intertek/SGS 各種格式，並精準排除 Period/Received 等干擾日期。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -485,7 +494,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v54.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v55.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

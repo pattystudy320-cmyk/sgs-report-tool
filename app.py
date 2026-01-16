@@ -26,11 +26,10 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘"]
 }
 
-# ★ v42.0: 補全 SGS 各種 PBB/PBDE 變體寫法 (含無空格版) ★
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和",
-        "Polybromobiphenyl", "Polybromobiphenyls", # 無空格
+        "Polybromobiphenyl", "Polybromobiphenyls",
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
         "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
@@ -42,7 +41,7 @@ GROUP_KEYWORDS = {
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和",
-        "Polybromodiphenyl ether", "Polybromodiphenyl ethers", # 無空格
+        "Polybromodiphenyl ether", "Polybromodiphenyl ethers",
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
@@ -58,16 +57,6 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
-# 黑名單: 這些檔案直接跳過
-NON_REPORT_BLOCKLIST = [
-    "material safety data sheet",
-    "safety data sheet",
-    "msds",
-    "specification approval",
-    "承認書",
-    "declaration of conformity"
-]
-
 OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
@@ -81,17 +70,11 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
-def is_valid_test_report_file(text_content):
-    txt_lower = text_content.lower()
-    for kw in NON_REPORT_BLOCKLIST:
-        if kw in txt_lower:
-            return False 
-    return True
-
 def extract_valid_report_date(text):
     lines = text.split('\n')
     valid_dates = []
     
+    # 支援各式日期格式
     patterns = [
         r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])",
         r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})",
@@ -99,7 +82,9 @@ def extract_valid_report_date(text):
         r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日"
     ]
     
+    # 白名單：只抓包含這些字的日期 (確保抓到的是報告日期)
     allow_list = ["date", "issue", "report", "日期"]
+    # 黑名單：排除批准日期
     block_list = ["approved", "approve", "承認", "核准", "檢驗", "expiry"]
 
     for line in lines:
@@ -214,10 +199,10 @@ def identify_columns_by_company(table, company):
                 if "result" in txt or "結果" in txt or re.search(r"00[1-9]", txt):
                     if result_idx == -1: result_idx = c_idx
 
-    if result_idx == -1:
-        if company == "SGS":
-            if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
-                result_idx = mdl_idx + 1
+    # 智慧推斷 (SGS)
+    if result_idx == -1 and company == "SGS":
+        if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
+            result_idx = mdl_idx + 1
     
     is_reference_table = False
     if result_idx == -1:
@@ -230,13 +215,11 @@ def identify_columns_by_company(table, company):
 
     return item_idx, result_idx, is_reference_table
 
-# --- 4. 核心：文字模式 (升級版) ---
+# --- 4. 核心：文字模式 (SGS 救援引擎) ---
 
 def parse_text_lines(text, data_pool, file_group_data, filename, company, targets=None):
-    """
-    targets: 指定要救援的項目清單 (例如 ["PBB", "PBDE"])
-    """
     lines = text.split('\n')
+    
     for line in lines:
         line_clean = clean_text(line)
         if not line_clean: continue
@@ -244,25 +227,21 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         matched_simple = None
         matched_group = None
         
-        # 判斷是否為目標
-        # 如果 targets 是 None，代表全掃 (例如 Pb 沒抓到時)
-        # 如果 targets 有值，只掃這些
-        
-        # Simple Check
+        # Simple Keywords
         for key, keywords in SIMPLE_KEYWORDS.items():
-            if targets and key not in targets: continue 
+            if targets and key not in targets: continue
             for kw in keywords:
-                if kw in line_clean and "test item" not in line_clean.lower():
+                if kw.lower() in line_clean.lower() and "test item" not in line_clean.lower():
                     matched_simple = key
                     break
             if matched_simple: break
         
-        # Group Check
+        # Group Keywords
         if not matched_simple:
             for group_key, keywords in GROUP_KEYWORDS.items():
                 if targets and group_key not in targets: continue
                 for kw in keywords:
-                    if kw in line_clean:
+                    if kw.lower() in line_clean.lower():
                         matched_group = group_key
                         break
                 if matched_group: break
@@ -274,15 +253,18 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             found_val = ""
             for part in reversed(parts):
                 p_lower = part.lower()
-                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---"]: continue
+                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl"]: continue
+                
                 if "nd" in p_lower:
                     found_val = "N.D."
                     break
+                
                 if re.match(r"^\d+.*$", part): 
                     val_check = part.replace("▲", "").replace("△", "")
                     try:
                         f = float(val_check)
-                        if f not in [100.0, 1000.0, 50.0, 25.0, 20.0, 10.0, 5.0, 2.0]:
+                        # 文字模式下，避免抓到 Limit，嚴格排除
+                        if f not in [100.0, 1000.0, 50.0]:
                             found_val = part
                             break
                     except: pass
@@ -310,22 +292,19 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
-                # 1. 守門員檢查
-                first_page_text = ""
-                if len(pdf.pages) > 0:
-                    first_page_text = pdf.pages[0].extract_text() or ""
+                # ★ v43.0: 移除所有文件過濾，一律處理 ★
                 
-                if not is_valid_test_report_file(first_page_text):
-                    continue 
-
                 file_dates = []
                 full_text_content = "" 
+                first_page_text = ""
                 
                 for p_idx in range(len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     
+                    if p_idx == 0: first_page_text = page_txt
+
                     if p_idx < 5:
                         d = extract_valid_report_date(page_txt)
                         if d: file_dates.append(d)
@@ -372,6 +351,7 @@ def process_files(files):
                                         break
                                     if re.search(r"^\d+(\.\d+)?", cell):
                                         try:
+                                            # 嚴格過濾備援掃描的 Limit/MDL
                                             if float(cell) in [1000, 100, 50, 25, 20, 10, 5, 2]: continue
                                         except: pass
                                         result = cell
@@ -393,8 +373,8 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式 (救援行動)
-                # ★ v42.0: 檢查哪些欄位沒抓到，就救哪些 ★
+                # 3. 引擎 B: 文字模式 (強制救援)
+                # ★ v43.0: 只要沒抓到，就啟動救援，不再檢查公司 ★
                 missing_targets = []
                 
                 # 檢查 Pb
@@ -407,8 +387,8 @@ def process_files(files):
                 # 檢查 PBDE
                 if not file_group_data["PBDE"]: missing_targets.append("PBDE")
                 
-                # 如果有缺，且是 SGS (通常這問題發生在 SGS)，啟動救援
-                if missing_targets and company == "SGS":
+                if missing_targets:
+                    # 全文掃描救援
                     parse_text_lines(full_text_content, data_pool, file_group_data, filename, company, targets=missing_targets)
 
             # 檔案結算
@@ -453,9 +433,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v42.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v42.0 雙引擎完全體)")
-st.info("💡 v42.0：文字掃描引擎升級，針對表格模式漏抓的項目 (PBB/PBDE) 進行獨立救援，並擴充關鍵字庫。")
+st.set_page_config(page_title="SGS 報告聚合工具 v43.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v43.0 雙引擎完全體)")
+st.info("💡 v43.0：移除所有檔案過濾限制，並強制啟動文字救援模式，確保偽表格報告 (如 SGS_L-011) 的 PBB/PBDE 能被正確抓取。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -476,7 +456,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v42.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v43.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

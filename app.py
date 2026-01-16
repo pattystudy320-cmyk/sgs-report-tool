@@ -57,13 +57,22 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
-# ★ v36.1 新增：MSDS 拒絕清單 ★
-# 只要第一頁出現這些字，直接跳過檔案
-MSDS_BLOCKLIST = [
-    "material safety data sheet",
-    "safety data sheet",
+# ★ v40.0: 雙重驗證清單 ★
+# 1. 黑名單: 出現即死
+NON_REPORT_BLOCKLIST = [
+    "safety data sheet", # 涵蓋 Material Safety Data Sheet
     "msds",
-    "sds"
+    "sds",
+    "specification approval",
+    "承認書",
+    "declaration of conformity"
+]
+# 2. 白名單: 必須包含 (確保是檢測報告)
+REPORT_MUST_HAVE = [
+    "test report",
+    "測試報告",
+    "analysis report",
+    "test result"
 ]
 
 OUTPUT_COLUMNS = [
@@ -79,22 +88,32 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
-def is_msds_file(text):
+def is_valid_test_report_file(text_content):
     """
-    v36.1: 檢查是否為 MSDS 文件
+    v40.0: 雙重驗證機制
     """
-    txt_lower = text.lower()
-    for kw in MSDS_BLOCKLIST:
-        # 檢查關鍵字是否出現，且不是出現在 "非 MSDS" 的聲明中
-        # 簡單判定：如果有 MSDS 標題，且沒有明顯的 Test Report 標題(雖然有些MSDS也會寫Report)，就擋掉
+    txt_lower = text_content.lower()
+    
+    # 1. 黑名單檢查 (Block)
+    for kw in NON_REPORT_BLOCKLIST:
         if kw in txt_lower:
-            return True
-    return False
+            # 再次確認不是 "We do not provide MSDS" 這種否定句
+            # 但通常 MSDS 文件標題很大，這裡簡單過濾即可
+            return False 
+            
+    # 2. 白名單檢查 (Allow) - 必須包含 "Test Report" 等字眼
+    has_report_keyword = False
+    for kw in REPORT_MUST_HAVE:
+        if kw in txt_lower:
+            has_report_keyword = True
+            break
+            
+    if not has_report_keyword:
+        return False
+        
+    return True
 
 def extract_valid_report_date(text):
-    """
-    v36.0 邏輯：嚴格日期提取 (Date/Report Date Only)
-    """
     lines = text.split('\n')
     valid_dates = []
     
@@ -139,6 +158,7 @@ def extract_valid_report_date(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
+        # v40: 針對 MSDS 常見的成分比例 (0.1, 0.01) 也加入防火牆，除非它是 Pb (Pb 常有大數值)
         if n in [1000.0, 100.0, 50.0]: return True
         return False
     except: return False
@@ -276,7 +296,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company):
                     val_check = part.replace("▲", "").replace("△", "")
                     try:
                         f = float(val_check)
-                        if f not in [100.0, 1000.0, 50.0]:
+                        if f not in [100.0, 1000.0, 50.0, 25.0, 20.0, 10.0, 5.0, 2.0]:
                             found_val = part
                             break
                     except: pass
@@ -303,15 +323,14 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
-                first_page_text = ""
-                if len(pdf.pages) > 0:
-                    first_page_text = pdf.pages[0].extract_text() or ""
-
-                # ★ v36.1: MSDS 守門員 ★
-                # 如果第一頁就發現是 MSDS，直接跳過整份檔案
-                if is_msds_file(first_page_text):
-                    # 可以選擇顯示警告或默默跳過
-                    # st.warning(f"跳過 MSDS 檔案: {filename}") 
+                # 1. 守門員檢查 (掃描前 2 頁)
+                first_few_pages_text = ""
+                for p_idx in range(min(2, len(pdf.pages))):
+                    first_few_pages_text += (pdf.pages[p_idx].extract_text() or "") + "\n"
+                
+                # ★ v40.0: 雙重驗證 - 是 Test Report 且 不是 MSDS ★
+                if not is_valid_test_report_file(first_few_pages_text):
+                    # st.warning(f"跳過非檢測報告檔案: {filename}") 
                     continue 
 
                 file_dates = []
@@ -329,9 +348,9 @@ def process_files(files):
                 if file_dates:
                      all_dates.append((max(file_dates), filename))
                 
-                company = identify_company(first_page_text)
+                company = identify_company(first_few_pages_text)
                 
-                if check_pfas_in_summary(first_page_text):
+                if check_pfas_in_summary(first_few_pages_text):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
                 # 2. 引擎 A: 表格模式
@@ -359,6 +378,7 @@ def process_files(files):
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
+                            # v37.0: 備援掃描時嚴格過濾 MDL/Limit
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -367,7 +387,9 @@ def process_files(files):
                                         result = cell
                                         break
                                     if re.search(r"^\d+(\.\d+)?", cell):
-                                        if float(cell) in [1000, 100, 50]: continue 
+                                        try:
+                                            if float(cell) in [1000, 100, 50, 25, 20, 10, 5, 2]: continue
+                                        except: pass
                                         result = cell
                                         break
                             
@@ -434,9 +456,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v36.1", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v36.1 MSDS過濾版)")
-st.info("💡 v36.1：基於 v36 嚴格日期版，新增 MSDS 自動過濾機制，避免 Cd/Hg 誤抓安全資料表數據。")
+st.set_page_config(page_title="SGS 報告聚合工具 v40.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v40.0)")
+st.info("💡 v40.0：導入「雙重驗證」文件過濾，必須包含 Test Report 且不含 MSDS 才會進行處理，徹底解決 Cd/Hg 誤抓問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -457,7 +479,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v36.1.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v40.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

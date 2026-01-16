@@ -74,48 +74,49 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
+def find_report_start_page(pdf):
+    """
+    v50.0: 智慧導航
+    掃描前 10 頁，尋找 "Test Report" 或 "測試報告" 的起始頁。
+    目的是跳過前面的承認書 (Approval Sheet) 或封面。
+    """
+    for i in range(min(10, len(pdf.pages))):
+        text = (pdf.pages[i].extract_text() or "").lower()
+        # 關鍵詞：必須包含 Test Report 且看起來像標題
+        if "test report" in text or "測試報告" in text:
+            # 排除只是在內文中提到 test report 的情況 (簡單判斷: 通常標題字少，但這裡先寬鬆)
+            return i
+    return 0 # 找不到就從第 0 頁開始
+
 def extract_labeled_report_date(text):
-    """
-    v49.0: 強制標籤鎖定 (Label Locking)
-    只抓取前面有 'Date', 'Report', 'Issue', '日期' 的日期。
-    排除裸露的日期數字，避免抓到批號或樣品編號。
-    """
     lines = text.split('\n')
     valid_dates = []
     
-    # 支援格式
+    # 支援格式 (含 CTIC 常用的 Mar. 31, 2025)
     patterns = [
         r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", # 2025/03/31
         r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", # 31-Mar-2025
-        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", # Mar 31 2025
-        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" # 2025年12月19日
+        r"([a-zA-Z]{3,})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", # Mar. 31, 2025
+        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" # 中文
     ]
     
     # 必須包含的標籤 (Label)
     must_have_kw = ["date", "dated", "issue", "report", "日期", "time"]
     
-    # 黑名單 (Blocklist)
+    # 黑名單
     block_kw = [
-        "approve", "approved", "approval", # 承認
-        "check", "checked", "review",      # 審核
-        "receive", "received", "receipt",  # 收件
-        "expiry", "valid", "due", "next",  # 有效期/下次
+        "approve", "approved", "approval", 
+        "check", "checked", "review", 
+        "receive", "received", "receipt",
+        "expiry", "valid", "due", "next",
         "承認", "核准", "檢驗", "收件", "有效"
     ]
 
     for line in lines:
         line_lower = line.lower()
-        
-        # 1. 檢查黑名單
-        if any(bad in line_lower for bad in block_kw):
-            continue 
+        if any(bad in line_lower for bad in block_kw): continue 
+        if not any(good in line_lower for good in must_have_kw): continue
 
-        # 2. ★ v49.0 關鍵：檢查白名單標籤 ★
-        # 如果這行沒有 "Date" 或 "日期" 等字眼，直接跳過，不抓純數字
-        if not any(good in line_lower for good in must_have_kw):
-            continue
-
-        # 3. 提取日期
         for pattern in patterns:
             matches = re.finditer(pattern, line, re.IGNORECASE)
             for match in matches:
@@ -124,11 +125,11 @@ def extract_labeled_report_date(text):
                     clean_str = full_match.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
                     clean_str = " ".join(clean_str.split())
                     
+                    # 嘗試解析月份英文 (Jan, Feb, March...)
                     dt = None
-                    for fmt in ["%Y %m %d", "%d %b %Y", "%b %d %Y"]:
+                    for fmt in ["%Y %m %d", "%d %b %Y", "%b %d %Y", "%B %d %Y"]: # %B for full month name
                         try:
                             dt = datetime.strptime(clean_str, fmt)
-                            # 年份合理性檢查
                             if 2000 <= dt.year <= 2030:
                                 valid_dates.append(dt)
                                 break
@@ -183,6 +184,7 @@ def identify_company(text):
     if "sgs" in txt: return "SGS"
     if "intertek" in txt: return "INTERTEK"
     if "cti" in txt or "centre testing" in txt: return "CTI"
+    if "ctic" in txt: return "CTIC" # v50.0 新增
     return "OTHERS"
 
 # --- 3. 核心：表格識別 ---
@@ -198,6 +200,7 @@ def identify_columns_by_company(table, company):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
+    # MSDS 過濾
     is_msds_table = False
     if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text:
         is_msds_table = True
@@ -218,19 +221,14 @@ def identify_columns_by_company(table, company):
             is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
             
             if not is_bad_header:
-                if company == "SGS":
-                    if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
-                        re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
-                        if "cas" not in txt and "method" not in txt and "limit" not in txt:
-                            if result_idx == -1: result_idx = c_idx
-                elif company == "INTERTEK":
-                    if "result" in txt or "green" in txt or "submitted" in txt:
-                        if result_idx == -1: result_idx = c_idx
-                else: 
-                    if "result" in txt or "結果" in txt or re.search(r"00[1-9]", txt):
+                # 通用邏輯 (含 CTIC)
+                if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
+                    re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
+                    if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
 
-    if result_idx == -1 and company == "SGS":
+    # SGS/CTIC 智慧推斷
+    if result_idx == -1 and (company == "SGS" or company == "CTIC"):
         if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
             result_idx = mdl_idx + 1
     
@@ -255,8 +253,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         line_clean = clean_text(line)
         if not line_clean: continue
         
-        if any(bad in line_clean.lower() for bad in MSDS_HEADER_KEYWORDS):
-            continue
+        if any(bad in line_clean.lower() for bad in MSDS_HEADER_KEYWORDS): continue
 
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
@@ -285,11 +282,9 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             for part in reversed(parts):
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl"]: continue
-                
                 if "nd" in p_lower:
                     found_val = "N.D."
                     break
-                
                 if re.match(r"^\d+.*$", part): 
                     val_check = part.replace("▲", "").replace("△", "")
                     try:
@@ -321,32 +316,38 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
-                file_dates_candidates = []
-                full_text_content = "" 
-                first_page_text = ""
+                # 1. 智慧導航：尋找真正的報告起始頁
+                start_page_idx = find_report_start_page(pdf)
                 
-                # 擴大掃描到前 10 頁
-                for p_idx in range(len(pdf.pages)):
+                # 抓取公司名稱 (用起始頁判斷)
+                if len(pdf.pages) > start_page_idx:
+                    first_relevant_page_text = pdf.pages[start_page_idx].extract_text() or ""
+                    company = identify_company(first_relevant_page_text)
+                    if check_pfas_in_summary(first_relevant_page_text):
+                        data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
+                else:
+                    company = "OTHERS"
+
+                file_dates = []
+                full_text_content = "" 
+                
+                # 從起始頁開始處理，跳過前面的承認書
+                for p_idx in range(start_page_idx, len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     
-                    if p_idx == 0: first_page_text = page_txt
-
-                    if p_idx < 10: 
+                    # 只在報告的前 5 頁 (相對於 start_page) 找日期
+                    if p_idx < start_page_idx + 5:
                         d = extract_labeled_report_date(page_txt)
-                        if d: file_dates_candidates.append(d)
+                        if d: file_dates.append(d)
                 
-                if file_dates_candidates:
-                     all_dates.append((max(file_dates_candidates), filename))
-                
-                company = identify_company(first_page_text)
-                
-                if check_pfas_in_summary(first_page_text):
-                    data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
+                if file_dates:
+                     all_dates.append((max(file_dates), filename))
 
                 # 2. 引擎 A: 表格模式
-                for page in pdf.pages:
+                for p_idx in range(start_page_idx, len(pdf.pages)):
+                    page = pdf.pages[p_idx]
                     tables = page.extract_tables()
                     for table in tables:
                         if not table or len(table) < 2: continue
@@ -452,9 +453,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v49.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v49.0 強制標籤版)")
-st.info("💡 v49.0：日期抓取邏輯再進化，強制要求日期必須有 Date/Report 標籤，徹底排除誤抓批號或樣品編號的問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v50.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v50.0 智慧導航版)")
+st.info("💡 v50.0：新增智慧導航功能，自動跳過文件前段的承認書/封面，直接定位到 Test Report 起始頁，徹底解決日期誤判與 CTIC/SGS 混搭問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -475,7 +476,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v49.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v50.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

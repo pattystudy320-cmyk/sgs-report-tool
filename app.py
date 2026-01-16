@@ -74,16 +74,14 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
-def extract_date_with_priority(text):
+def extract_labeled_report_date(text):
     """
-    v48.0: 日期權重分級 (Tier System)
-    Tier 1: 明確標示為 Report/Issue Date
-    Tier 2: 普通日期
-    Drop: 含有 Approved/Check/Receive 的日期
+    v49.0: 強制標籤鎖定 (Label Locking)
+    只抓取前面有 'Date', 'Report', 'Issue', '日期' 的日期。
+    排除裸露的日期數字，避免抓到批號或樣品編號。
     """
     lines = text.split('\n')
-    tier1_dates = []
-    tier2_dates = []
+    valid_dates = []
     
     # 支援格式
     patterns = [
@@ -93,25 +91,31 @@ def extract_date_with_priority(text):
         r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" # 2025年12月19日
     ]
     
-    # 權重關鍵字
-    high_priority_kw = ["report date", "issue date", "date:", "日期:"]
-    # 封殺關鍵字
+    # 必須包含的標籤 (Label)
+    must_have_kw = ["date", "dated", "issue", "report", "日期", "time"]
+    
+    # 黑名單 (Blocklist)
     block_kw = [
-        "approve", "approved", "approval", "approver", # 承認/核准
-        "check", "checked", "review", "reviewed",      # 審核
-        "receive", "received", "receipt",              # 收件
-        "承認", "核准", "檢驗", "收件", "有效", "expiry", "validity"
+        "approve", "approved", "approval", # 承認
+        "check", "checked", "review",      # 審核
+        "receive", "received", "receipt",  # 收件
+        "expiry", "valid", "due", "next",  # 有效期/下次
+        "承認", "核准", "檢驗", "收件", "有效"
     ]
 
     for line in lines:
         line_lower = line.lower()
         
-        # 1. 檢查黑名單 (優先排除)
+        # 1. 檢查黑名單
         if any(bad in line_lower for bad in block_kw):
             continue 
 
-        # 2. 提取日期
-        found_dt = None
+        # 2. ★ v49.0 關鍵：檢查白名單標籤 ★
+        # 如果這行沒有 "Date" 或 "日期" 等字眼，直接跳過，不抓純數字
+        if not any(good in line_lower for good in must_have_kw):
+            continue
+
+        # 3. 提取日期
         for pattern in patterns:
             matches = re.finditer(pattern, line, re.IGNORECASE)
             for match in matches:
@@ -120,31 +124,19 @@ def extract_date_with_priority(text):
                     clean_str = full_match.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
                     clean_str = " ".join(clean_str.split())
                     
+                    dt = None
                     for fmt in ["%Y %m %d", "%d %b %Y", "%b %d %Y"]:
                         try:
                             dt = datetime.strptime(clean_str, fmt)
-                            # 簡單年份過濾
+                            # 年份合理性檢查
                             if 2000 <= dt.year <= 2030:
-                                found_dt = dt
+                                valid_dates.append(dt)
                                 break
                         except: continue
-                    if found_dt: break
                 except: continue
-            if found_dt: break
-        
-        if found_dt:
-            # 3. 分級
-            if any(good in line_lower for good in high_priority_kw):
-                tier1_dates.append(found_dt)
-            else:
-                tier2_dates.append(found_dt)
     
-    # 決策：優先回傳 Tier 1 的日期
-    if tier1_dates:
-        return max(tier1_dates) # 取最晚的 Report Date
-    elif tier2_dates:
-        return max(tier2_dates) # 沒標籤只好取最晚的普通日期
-    
+    if valid_dates:
+        return max(valid_dates)
     return None
 
 def is_suspicious_limit_value(val):
@@ -206,7 +198,6 @@ def identify_columns_by_company(table, company):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
-    # MSDS 成分表過濾
     is_msds_table = False
     if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text:
         is_msds_table = True
@@ -294,9 +285,11 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             for part in reversed(parts):
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl"]: continue
+                
                 if "nd" in p_lower:
                     found_val = "N.D."
                     break
+                
                 if re.match(r"^\d+.*$", part): 
                     val_check = part.replace("▲", "").replace("△", "")
                     try:
@@ -332,7 +325,7 @@ def process_files(files):
                 full_text_content = "" 
                 first_page_text = ""
                 
-                # ★ v48.0: 擴大掃描到前 10 頁，確保抓到內頁報告日期 ★
+                # 擴大掃描到前 10 頁
                 for p_idx in range(len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     page_txt = page.extract_text() or ""
@@ -341,12 +334,10 @@ def process_files(files):
                     if p_idx == 0: first_page_text = page_txt
 
                     if p_idx < 10: 
-                        d = extract_date_with_priority(page_txt)
+                        d = extract_labeled_report_date(page_txt)
                         if d: file_dates_candidates.append(d)
                 
                 if file_dates_candidates:
-                     # 這裡的 candidates 已經是每頁 "最好的" 日期
-                     # 取 max 會得到最晚的 (通常報告日期 >= 測試結束日)
                      all_dates.append((max(file_dates_candidates), filename))
                 
                 company = identify_company(first_page_text)
@@ -461,9 +452,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v48.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v48.0)")
-st.info("💡 v48.0：日期權重分級系統 + 深度掃描，確保承認書日期被過濾，並正確提取內頁報告日期。")
+st.set_page_config(page_title="SGS 報告聚合工具 v49.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v49.0 強制標籤版)")
+st.info("💡 v49.0：日期抓取邏輯再進化，強制要求日期必須有 Date/Report 標籤，徹底排除誤抓批號或樣品編號的問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -484,7 +475,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v48.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v49.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

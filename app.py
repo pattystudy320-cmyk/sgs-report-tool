@@ -57,7 +57,6 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
-# MSDS 欄位特徵 (表格模式用)
 MSDS_HEADER_KEYWORDS = [
     "content", "composition", "concentration", "含量", "成分"
 ]
@@ -75,16 +74,13 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
-def extract_report_date_priority(text):
+def extract_clean_report_date(text):
     """
-    v46.0: 優先級日期提取
-    Tier 1: 明確標示為 Report/Issue Date 且無 Approve 字眼
-    Tier 2: 純日期
-    Drop: 含有 Approve/Check/Review/承認/核准 的行
+    v47.0: 行級過濾 (Line-Level Filtering)
+    只有當該行包含 "Date" 且 不包含 "Approved/Received" 時，才提取日期。
     """
     lines = text.split('\n')
-    tier1_dates = []
-    tier2_dates = []
+    valid_dates = []
     
     patterns = [
         r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])",
@@ -93,19 +89,29 @@ def extract_report_date_priority(text):
         r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日"
     ]
     
-    # 關鍵字定義
-    high_priority_kw = ["issue", "report", "date:", "日期:"]
-    block_kw = ["approved", "approve", "checked", "reviewed", "承認", "核准", "檢驗", "validity", "expiry"]
+    # 必須包含的關鍵字
+    allow_kw = ["date", "issue", "report", "日期"]
+    
+    # 絕對禁止的關鍵字 (只要這行出現這些字，這行的日期就作廢)
+    block_kw = [
+        "approve", "approved", "approval", "approver", # 承認/核准
+        "check", "checked", "review", "reviewed",      # 審核/檢查
+        "receive", "received", "receipt",              # 收件 (通常比較早，排除以防萬一)
+        "承认", "核准", "檢驗", "收件", "有效", "expiry", "validity"
+    ]
 
     for line in lines:
         line_lower = line.lower()
         
-        # 1. 黑名單：出現即丟棄 (不管是 Tier 1 還是 Tier 2)
+        # 1. 黑名單檢查 (Block)
         if any(bad in line_lower for bad in block_kw):
             continue 
 
-        # 2. 提取日期
-        found_dt = None
+        # 2. 白名單檢查 (Allow)
+        if not any(good in line_lower for good in allow_kw):
+            continue
+
+        # 3. 提取日期
         for pattern in patterns:
             matches = re.finditer(pattern, line, re.IGNORECASE)
             for match in matches:
@@ -114,31 +120,21 @@ def extract_report_date_priority(text):
                     clean_str = full_match.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
                     clean_str = " ".join(clean_str.split())
                     
+                    dt = None
                     for fmt in ["%Y %m %d", "%d %b %Y", "%b %d %Y"]:
                         try:
                             dt = datetime.strptime(clean_str, fmt)
-                            if 2000 <= dt.year <= 2030:
-                                found_dt = dt
-                                break
+                            break
                         except: continue
-                    if found_dt: break
+                    
+                    if dt and 2000 <= dt.year <= 2030:
+                        valid_dates.append(dt)
                 except: continue
-            if found_dt: break
-        
-        if found_dt:
-            # 3. 分級
-            if any(good in line_lower for good in high_priority_kw):
-                tier1_dates.append(found_dt)
-            else:
-                tier2_dates.append(found_dt)
     
-    # 回傳邏輯：有 Tier 1 就回傳 Tier 1 最晚的 (通常報告只有一個 Issue Date，若有多個取最晚也合理)
-    # 若無 Tier 1，才回傳 Tier 2 最晚的
-    if tier1_dates:
-        return max(tier1_dates)
-    elif tier2_dates:
-        return max(tier2_dates)
-    
+    # 經過清洗後，剩下的應該只有 Test Period 和 Report Date
+    # 取 max 應該就是 Report Date
+    if valid_dates:
+        return max(valid_dates)
     return None
 
 def is_suspicious_limit_value(val):
@@ -200,7 +196,6 @@ def identify_columns_by_company(table, company):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
-    # 檢查是否為 MSDS 成分表
     is_msds_table = False
     if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text:
         is_msds_table = True
@@ -288,11 +283,9 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             for part in reversed(parts):
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl"]: continue
-                
                 if "nd" in p_lower:
                     found_val = "N.D."
                     break
-                
                 if re.match(r"^\d+.*$", part): 
                     val_check = part.replace("▲", "").replace("△", "")
                     try:
@@ -324,7 +317,7 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
-                file_dates_candidates = []
+                file_dates = []
                 full_text_content = "" 
                 first_page_text = ""
                 
@@ -335,15 +328,13 @@ def process_files(files):
                     
                     if p_idx == 0: first_page_text = page_txt
 
-                    # v46.0: 使用優先級日期提取
+                    # v47.0: 前5頁嚴格提取日期
                     if p_idx < 5:
-                        d = extract_report_date_priority(page_txt)
-                        if d: file_dates_candidates.append(d)
+                        d = extract_clean_report_date(page_txt)
+                        if d: file_dates.append(d)
                 
-                if file_dates_candidates:
-                     # 選最晚的 (因為 Tier 1 和 Tier 2 已經在 extract_report_date_priority 內部決策過了)
-                     # 這裡取 max 是為了跨頁比較 (通常報告日期各頁一致)
-                     all_dates.append((max(file_dates_candidates), filename))
+                if file_dates:
+                     all_dates.append((max(file_dates), filename))
                 
                 company = identify_company(first_page_text)
                 
@@ -457,9 +448,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v46.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v46.0 日期優化版)")
-st.info("💡 v46.0：採用優先級日期提取邏輯，優先抓取 Report Date，自動剔除 Approved/承認日期，解決承認書覆蓋問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v47.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v47.0)")
+st.info("💡 v47.0：精準日期過濾，嚴格剔除 Approved/承認日期，確保只抓取 Report Date。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -480,7 +471,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v46.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v47.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

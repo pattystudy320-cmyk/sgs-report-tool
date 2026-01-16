@@ -81,79 +81,84 @@ def find_report_start_page(pdf):
             return i
     return 0
 
-def extract_dates_scoring_system(text):
+def extract_dates_universal(text):
     """
-    v55.0: 積分權重制 (Scoring System)
-    不依賴強制標籤，而是給予每個找到的日期分數。
-    +100: Report Date, Issue Date, Date:
-    -100: Received, Period, Started, Approved
-    +1:   純日期 (Neutral)
+    v56.0: 萬能格式支援 (基於 v20.0 邏輯) + 積分過濾 (v55.0)
+    策略：先將所有標點符號替換為空白，再用寬鬆正則抓取。
     """
     lines = text.split('\n')
     candidates = [] # (score, date_object)
     
-    patterns = [
-        # 2025/01/08, 2025-01-08
-        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", 
-        # 05-Feb-2024 (SGS)
-        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", 
-        # Jan. 08, 2025 (CTI) - 允許點和逗號
-        r"([a-zA-Z]{3,})\.?\s+(0?[1-9]|[12][0-9]|3[01])(?:st|nd|rd|th)?[\,\s]+\s*(20\d{2})",
-        # 08 Jan, 2025 (Intertek)
-        r"(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3,})\,?\s+(20\d{2})",
-        # 中文
-        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" 
-    ]
-    
-    # 加分項
+    # 權重設定
     bonus_kw = ["report date", "issue date", "date:", "日期:", "dated"]
-    # 扣分項 (毒藥)
     poison_kw = [
         "approve", "approved", "approval", "approver", 
         "check", "checked", "review", "reviewed",      
         "receive", "received", "receipt",
-        "period", "testing period", "started", "from", "to ", # 測試期間
+        "period", "testing period", "started", "from", "to ",
         "承認", "核准", "檢驗", "收件", "有效", "expiry", "valid", "期間"
     ]
+
+    # 萬能正則 (針對已清洗過，只剩空白分隔的字串)
+    # 1. YYYY MM DD (2025 01 08)
+    pat_ymd = r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(0?[1-9]|[12][0-9]|3[01])"
+    # 2. DD Mon YYYY (06 Jan 2025)
+    pat_dmy = r"(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3,})\s+(20\d{2})"
+    # 3. Mon DD YYYY (Jan 08 2025)
+    pat_mdy = r"([a-zA-Z]{3,})\s+(0?[1-9]|[12][0-9]|3[01])\s+(20\d{2})"
+    # 4. 中文 (2025年01月08日) - 這個不用清洗，直接抓
+    pat_zh = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日"
 
     for line in lines:
         line_lower = line.lower()
         
-        # 計算該行分數
-        score = 1 # 預設普通分
+        # 1. 計算分數
+        score = 1
         if any(bad in line_lower for bad in poison_kw):
-            score = -100 # 毒藥行
+            score = -100 # 毒藥
         elif any(good in line_lower for good in bonus_kw):
-            score = 100 # 黃金行
+            score = 100 # 黃金
 
-        # 提取日期
-        for pattern in patterns:
-            matches = re.finditer(pattern, line, re.IGNORECASE)
-            for match in matches:
-                try:
-                    full_match = match.group(0)
-                    # 清洗字串: 移除逗號、點、多餘空白
-                    clean_str = full_match.replace(",", " ").replace(".", " ").replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
-                    clean_str = " ".join(clean_str.split())
-                    
-                    dt = None
-                    formats = [
-                        "%Y %m %d", 
-                        "%d %b %Y", 
-                        "%b %d %Y", 
-                        "%B %d %Y", # Full month name (January)
-                        "%d %B %Y"
-                    ]
-                    
-                    for fmt in formats:
-                        try:
-                            dt = datetime.strptime(clean_str, fmt)
-                            if 2000 <= dt.year <= 2030:
-                                candidates.append((score, dt))
-                                break
-                        except: continue
-                except: continue
-    
+        # 2. 暴力清洗：把標點符號都變成空白，讓格式統一
+        # 保留中文字，但把 .,-/ 都換成空白
+        clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
+        # 壓縮連續空白
+        clean_line = " ".join(clean_line.split())
+
+        # 3. 嘗試匹配
+        found_dt = None
+        
+        # 中文優先 (因為格式最固定)
+        zh_match = re.search(pat_zh, line) # 用原行抓中文
+        if zh_match:
+            try:
+                y, m, d = zh_match.groups()
+                found_dt = datetime(int(y), int(m), int(d))
+            except: pass
+        
+        if not found_dt:
+            # 英文格式 (用清洗後的行)
+            for pat in [pat_ymd, pat_dmy, pat_mdy]:
+                matches = re.finditer(pat, clean_line, re.IGNORECASE)
+                for match in matches:
+                    try:
+                        groups = match.groups()
+                        date_str = " ".join(groups)
+                        # 嘗試多種解析格式
+                        for fmt in ["%Y %m %d", "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y"]:
+                            try:
+                                dt = datetime.strptime(date_str, fmt)
+                                if 2000 <= dt.year <= 2030:
+                                    found_dt = dt
+                                    break
+                            except: continue
+                        if found_dt: break
+                    except: continue
+                if found_dt: break
+        
+        if found_dt:
+            candidates.append((score, found_dt))
+            
     return candidates
 
 def is_suspicious_limit_value(val):
@@ -236,13 +241,11 @@ def identify_columns_by_company(table, company):
             is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
             
             if not is_bad_header:
-                # 通用邏輯
                 if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
                     re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
 
-    # SGS/CTIC 智慧推斷
     if result_idx == -1 and (company == "SGS" or company == "CTIC"):
         if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
             result_idx = mdl_idx + 1
@@ -321,7 +324,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
-    all_file_valid_dates = [] # 儲存所有檔案的候選日期 (Score, Date)
+    all_file_valid_dates = [] 
     
     progress_bar = st.progress(0)
     
@@ -341,7 +344,7 @@ def process_files(files):
                     if check_pfas_in_summary(first_relevant_page_text):
                         data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
-                # v55.0: 日期提取 - 收集每個檔案的日期候選人
+                # v56.0: 日期提取 - 使用萬能格式 + 積分系統
                 file_dates_candidates = []
                 full_text_content = "" 
                 
@@ -351,10 +354,9 @@ def process_files(files):
                     full_text_content += page_txt + "\n"
                     
                     if p_idx < start_page_idx + 5:
-                        dates = extract_dates_scoring_system(page_txt)
+                        dates = extract_dates_universal(page_txt)
                         file_dates_candidates.extend(dates)
                 
-                # 每個檔案選出一個「最佳日期」加入大池子
                 if file_dates_candidates:
                     # 排序: 分數高優先 -> 日期晚優先
                     best_date = sorted(file_dates_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
@@ -471,9 +473,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v55.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v55.0 積分日期版)")
-st.info("💡 v55.0：採用「積分權重制」抓取日期，完美支援 CTI/Intertek/SGS 各種格式，並精準排除 Period/Received 等干擾日期。")
+st.set_page_config(page_title="SGS 報告聚合工具 v56.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v56.0 萬能格式回歸版)")
+st.info("💡 v56.0：回歸 v20.0 的萬能日期格式邏輯 (暴力清洗標點)，並結合 v55.0 的積分過濾，完美支援 CTI/Intertek 複雜格式，同時排除承認日期。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -494,7 +496,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v55.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v56.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

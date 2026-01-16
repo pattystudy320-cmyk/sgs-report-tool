@@ -57,6 +57,15 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
+# ★ v36.1 新增：MSDS 拒絕清單 ★
+# 只要第一頁出現這些字，直接跳過檔案
+MSDS_BLOCKLIST = [
+    "material safety data sheet",
+    "safety data sheet",
+    "msds",
+    "sds"
+]
+
 OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
@@ -70,39 +79,40 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
+def is_msds_file(text):
+    """
+    v36.1: 檢查是否為 MSDS 文件
+    """
+    txt_lower = text.lower()
+    for kw in MSDS_BLOCKLIST:
+        # 檢查關鍵字是否出現，且不是出現在 "非 MSDS" 的聲明中
+        # 簡單判定：如果有 MSDS 標題，且沒有明顯的 Test Report 標題(雖然有些MSDS也會寫Report)，就擋掉
+        if kw in txt_lower:
+            return True
+    return False
+
 def extract_valid_report_date(text):
     """
-    v36.0: 嚴格日期提取
-    1. 白名單: 必須包含 Date, Issue, Report, 日期
-    2. 黑名單: 絕對不可包含 Approved, 承認, 核准, 檢驗 (避免抓到承認書日期)
+    v36.0 邏輯：嚴格日期提取 (Date/Report Date Only)
     """
     lines = text.split('\n')
     valid_dates = []
     
-    # 支援格式
     patterns = [
-        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", # 2025/03/31
-        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", # 31-Mar-2025
-        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", # Mar 31 2025
-        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日" # 2025年12月19日
+        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])",
+        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})",
+        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})",
+        r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日"
     ]
     
-    # ★ 關鍵：定義白名單與黑名單 ★
     allow_list = ["date", "issue", "report", "日期"]
     block_list = ["approved", "approve", "承認", "核准", "檢驗", "expiry"]
 
     for line in lines:
         line_lower = line.lower()
-        
-        # 1. 檢查黑名單 (優先排除)
-        if any(bad in line_lower for bad in block_list):
-            continue # 跳過此行
-            
-        # 2. 檢查白名單 (必須包含)
-        if not any(good in line_lower for good in allow_list):
-            continue # 跳過此行
+        if any(bad in line_lower for bad in block_list): continue 
+        if not any(good in line_lower for good in allow_list): continue 
 
-        # 3. 提取日期
         for pattern in patterns:
             matches = re.finditer(pattern, line, re.IGNORECASE)
             for match in matches:
@@ -123,7 +133,7 @@ def extract_valid_report_date(text):
                 except: continue
     
     if valid_dates:
-        return max(valid_dates) # 回傳符合條件中最晚的日期
+        return max(valid_dates)
     return None
 
 def is_suspicious_limit_value(val):
@@ -154,7 +164,7 @@ def parse_value_priority(value_str):
     if num_match:
         try:
             number = float(num_match.group(1))
-            return (3, number, num_match.group(1))
+            return (3, number, val)
         except: pass
             
     return (0, 0, val)
@@ -293,29 +303,35 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
+                first_page_text = ""
+                if len(pdf.pages) > 0:
+                    first_page_text = pdf.pages[0].extract_text() or ""
+
+                # ★ v36.1: MSDS 守門員 ★
+                # 如果第一頁就發現是 MSDS，直接跳過整份檔案
+                if is_msds_file(first_page_text):
+                    # 可以選擇顯示警告或默默跳過
+                    # st.warning(f"跳過 MSDS 檔案: {filename}") 
+                    continue 
+
                 file_dates = []
-                first_few_pages_text = ""
                 full_text_content = "" 
                 
-                # 擴大掃描到前 5 頁，避免承認書蓋掉報告
                 for p_idx in range(len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     
-                    # 只在前 5 頁找日期
                     if p_idx < 5:
-                        first_few_pages_text += page_txt
+                        d = extract_valid_report_date(page_txt)
+                        if d: file_dates.append(d)
                 
-                # ★ v36.0: 嚴格過濾日期 ★
-                # 從前 5 頁的文字中，提取符合條件的日期
-                d = extract_valid_report_date(first_few_pages_text)
-                if d: 
-                    all_dates.append((d, filename))
+                if file_dates:
+                     all_dates.append((max(file_dates), filename))
                 
-                company = identify_company(first_few_pages_text)
+                company = identify_company(first_page_text)
                 
-                if check_pfas_in_summary(first_few_pages_text):
+                if check_pfas_in_summary(first_page_text):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
                 # 2. 引擎 A: 表格模式
@@ -402,14 +418,12 @@ def process_files(files):
         final_row[key] = best_record['priority'][2]
 
     final_date_str = ""
-    # v36.0: 選取所有檔案中最晚的「報告日期」
     if all_dates:
         latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
         final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
     
     final_row["日期"] = final_date_str
     
-    # 找 Pb 來源 (最大值優先)
     pb_candidates = data_pool.get("Pb", [])
     if pb_candidates:
         best_pb = sorted(pb_candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
@@ -420,9 +434,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v36.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v36.0 嚴格日期版)")
-st.info("💡 v36.0：啟動嚴格日期過濾，完全封鎖「Approved/承認」日期，僅抓取「Date/Issue/Report」日期。")
+st.set_page_config(page_title="SGS 報告聚合工具 v36.1", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v36.1 MSDS過濾版)")
+st.info("💡 v36.1：基於 v36 嚴格日期版，新增 MSDS 自動過濾機制，避免 Cd/Hg 誤抓安全資料表數據。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -443,7 +457,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v36.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v36.1.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

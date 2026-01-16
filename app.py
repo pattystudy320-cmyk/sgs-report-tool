@@ -57,22 +57,15 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
-# ★ v40.0: 雙重驗證清單 ★
-# 1. 黑名單: 出現即死
+# ★ v41.0: 僅保留黑名單，移除白名單 ★
+# 只有明確出現這些字眼的檔案才會被跳過
 NON_REPORT_BLOCKLIST = [
-    "safety data sheet", # 涵蓋 Material Safety Data Sheet
+    "material safety data sheet",
+    "safety data sheet",
     "msds",
-    "sds",
     "specification approval",
     "承認書",
     "declaration of conformity"
-]
-# 2. 白名單: 必須包含 (確保是檢測報告)
-REPORT_MUST_HAVE = [
-    "test report",
-    "測試報告",
-    "analysis report",
-    "test result"
 ]
 
 OUTPUT_COLUMNS = [
@@ -90,27 +83,16 @@ def clean_text(text):
 
 def is_valid_test_report_file(text_content):
     """
-    v40.0: 雙重驗證機制
+    v41.0: 寬鬆檢查
+    只要不是 MSDS 或 承認書，就預設它是有效的，嘗試去抓
     """
     txt_lower = text_content.lower()
     
-    # 1. 黑名單檢查 (Block)
+    # 黑名單檢查 (Block)
     for kw in NON_REPORT_BLOCKLIST:
         if kw in txt_lower:
-            # 再次確認不是 "We do not provide MSDS" 這種否定句
-            # 但通常 MSDS 文件標題很大，這裡簡單過濾即可
             return False 
             
-    # 2. 白名單檢查 (Allow) - 必須包含 "Test Report" 等字眼
-    has_report_keyword = False
-    for kw in REPORT_MUST_HAVE:
-        if kw in txt_lower:
-            has_report_keyword = True
-            break
-            
-    if not has_report_keyword:
-        return False
-        
     return True
 
 def extract_valid_report_date(text):
@@ -158,7 +140,6 @@ def extract_valid_report_date(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        # v40: 針對 MSDS 常見的成分比例 (0.1, 0.01) 也加入防火牆，除非它是 Pb (Pb 常有大數值)
         if n in [1000.0, 100.0, 50.0]: return True
         return False
     except: return False
@@ -328,9 +309,8 @@ def process_files(files):
                 for p_idx in range(min(2, len(pdf.pages))):
                     first_few_pages_text += (pdf.pages[p_idx].extract_text() or "") + "\n"
                 
-                # ★ v40.0: 雙重驗證 - 是 Test Report 且 不是 MSDS ★
+                # ★ v41.0: 只檢查黑名單，不要求白名單 ★
                 if not is_valid_test_report_file(first_few_pages_text):
-                    # st.warning(f"跳過非檢測報告檔案: {filename}") 
                     continue 
 
                 file_dates = []
@@ -378,7 +358,6 @@ def process_files(files):
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # v37.0: 備援掃描時嚴格過濾 MDL/Limit
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -456,9 +435,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v40.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v40.0)")
-st.info("💡 v40.0：導入「雙重驗證」文件過濾，必須包含 Test Report 且不含 MSDS 才會進行處理，徹底解決 Cd/Hg 誤抓問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v41.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v41.0 寬鬆過濾版)")
+st.info("💡 v41.0：修正過濾邏輯，只封鎖明確的 MSDS/承認書，允許所有潛在的檢測報告通過。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -479,7 +458,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v40.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v41.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

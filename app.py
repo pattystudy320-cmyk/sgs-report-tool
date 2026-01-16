@@ -267,4 +267,225 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         if any(bad in line_clean.lower() for bad in MSDS_HEADER_KEYWORDS): continue
 
         matched_simple = None
-        for key, keywords in SIMPLE_KEYWORDS.items
+        for key, keywords in SIMPLE_KEYWORDS.items():
+            if targets and key not in targets: continue
+            for kw in keywords:
+                if kw.lower() in line_clean.lower() and "test item" not in line_clean.lower():
+                    matched_simple = key
+                    break
+            if matched_simple: break
+        
+        matched_group = None
+        if not matched_simple:
+            for group_key, keywords in GROUP_KEYWORDS.items():
+                if targets and group_key not in targets: continue
+                for kw in keywords:
+                    if kw.lower() in line_clean.lower():
+                        matched_group = group_key
+                        break
+                if matched_group: break
+        
+        if matched_simple or matched_group:
+            parts = line_clean.split()
+            if len(parts) < 2: continue
+            
+            found_val = ""
+            for part in reversed(parts):
+                p_lower = part.lower()
+                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl"]: continue
+                if "nd" in p_lower:
+                    found_val = "N.D."
+                    break
+                if re.match(r"^\d+.*$", part): 
+                    val_check = part.replace("▲", "").replace("△", "")
+                    try:
+                        f = float(val_check)
+                        if f not in [100.0, 1000.0, 50.0, 25.0, 20.0, 10.0, 5.0, 2.0]:
+                            found_val = part
+                            break
+                    except: pass
+            
+            if found_val:
+                priority = parse_value_priority(found_val)
+                if priority[0] == 0: continue
+                if matched_simple:
+                    data_pool[matched_simple].append({"priority": priority, "filename": filename})
+                elif matched_group:
+                    file_group_data[matched_group].append(priority)
+
+# --- 主程式 ---
+
+def process_files(files):
+    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
+    all_dates = [] 
+    
+    progress_bar = st.progress(0)
+    
+    for i, file in enumerate(files):
+        filename = file.name
+        file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
+        
+        try:
+            with pdfplumber.open(file) as pdf:
+                start_page_idx = find_report_start_page(pdf)
+                
+                if len(pdf.pages) > start_page_idx:
+                    first_relevant_page_text = pdf.pages[start_page_idx].extract_text() or ""
+                    company = identify_company(first_relevant_page_text)
+                    if check_pfas_in_summary(first_relevant_page_text):
+                        data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
+                else:
+                    company = "OTHERS"
+
+                file_valid_dates = []
+                full_text_content = "" 
+                
+                for p_idx in range(start_page_idx, len(pdf.pages)):
+                    page = pdf.pages[p_idx]
+                    page_txt = page.extract_text() or ""
+                    full_text_content += page_txt + "\n"
+                    
+                    if p_idx < start_page_idx + 5:
+                        dates = extract_dates_final(page_txt)
+                        file_valid_dates.extend(dates)
+                
+                if file_valid_dates:
+                    # 排序：Priority DESC, Date DESC
+                    best = sorted(file_valid_dates, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                    all_dates.append(best[1])
+
+                # 2. 引擎 A: 表格模式
+                for p_idx in range(start_page_idx, len(pdf.pages)):
+                    page = pdf.pages[p_idx]
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if not table or len(table) < 2: continue
+                        
+                        item_idx, result_idx, is_skip_table = identify_columns_by_company(table, company)
+                        if is_skip_table: continue 
+
+                        for row_idx, row in enumerate(table):
+                            clean_row = [clean_text(cell) for cell in row]
+                            row_txt = "".join(clean_row).lower()
+                            if "test item" in row_txt or "result" in row_txt or "restricted" in row_txt: continue
+                            if not any(clean_row): continue
+                            
+                            target_item_col = item_idx if item_idx != -1 else 0
+                            if target_item_col >= len(clean_row): continue
+                            item_name = clean_row[target_item_col]
+                            
+                            if "pvc" in item_name.lower() or "polyvinyl" in item_name.lower(): continue
+
+                            result = ""
+                            if result_idx != -1 and result_idx < len(clean_row):
+                                result = clean_row[result_idx]
+                            
+                            if not result:
+                                for cell in reversed(clean_row):
+                                    c_lower = cell.lower()
+                                    if not cell: continue
+                                    if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
+                                        result = cell
+                                        break
+                                    if re.search(r"^\d+(\.\d+)?", cell):
+                                        try:
+                                            if float(cell) in [1000, 100, 50, 25, 20, 10, 5, 2]: continue
+                                        except: pass
+                                        result = cell
+                                        break
+                            
+                            priority = parse_value_priority(result)
+                            if priority[0] == 0: continue 
+
+                            for target_key, keywords in SIMPLE_KEYWORDS.items():
+                                for kw in keywords:
+                                    if kw.lower() in item_name.lower():
+                                        if target_key == "PFOS" and "related" in item_name.lower(): continue 
+                                        data_pool[target_key].append({"priority": priority, "filename": filename})
+                                        break
+
+                            for group_key, keywords in GROUP_KEYWORDS.items():
+                                for kw in keywords:
+                                    if kw.lower() in item_name.lower():
+                                        file_group_data[group_key].append(priority)
+                                        break
+                
+                # 3. 引擎 B: 文字模式
+                missing_targets = []
+                pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
+                if not pb_data: missing_targets.append("Pb")
+                if not file_group_data["PBB"]: missing_targets.append("PBB")
+                if not file_group_data["PBDE"]: missing_targets.append("PBDE")
+                
+                if missing_targets:
+                    parse_text_lines(full_text_content, data_pool, file_group_data, filename, company, targets=missing_targets)
+
+            # 檔案結算
+            for group_key, values in file_group_data.items():
+                if values:
+                    best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                    data_pool[group_key].append({
+                        "priority": best_in_file,
+                        "filename": filename
+                    })
+
+        except Exception as e:
+            st.warning(f"檔案 {filename} 解析異常: {e}")
+        
+        progress_bar.progress((i + 1) / len(files))
+
+    # 聚合
+    final_row = {}
+    for key in OUTPUT_COLUMNS:
+        if key in ["日期", "檔案名稱"]: continue
+        candidates = data_pool.get(key, [])
+        if not candidates:
+            final_row[key] = "" 
+            continue
+        best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
+        final_row[key] = best_record['priority'][2]
+
+    final_date_str = ""
+    if all_dates:
+        latest_date = max(all_dates)
+        final_date_str = latest_date.strftime("%Y/%m/%d")
+    
+    final_row["日期"] = final_date_str
+    
+    pb_candidates = data_pool.get("Pb", [])
+    if pb_candidates:
+        best_pb = sorted(pb_candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
+        final_row["檔案名稱"] = best_pb['filename']
+    else:
+        final_row["檔案名稱"] = files[0].name if files else ""
+
+    return [final_row]
+
+# --- 介面 ---
+st.set_page_config(page_title="SGS 報告聚合工具 v54.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v54.0 日期淨化版)")
+st.info("💡 v54.0：嚴格排除 Testing Period (測試期間) 日期，確保只抓取 Report Date (發行日期)，並維持對 CTI/Intertek/SGS 多種格式的支援。")
+
+uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
+
+if uploaded_files:
+    if st.button("🔄 重新執行"): st.rerun()
+
+    try:
+        result_data = process_files(uploaded_files)
+        df = pd.DataFrame(result_data)
+        for col in OUTPUT_COLUMNS:
+            if col not in df.columns: df[col] = ""
+        df = df[OUTPUT_COLUMNS]
+
+        st.success("✅ 處理完成！")
+        st.dataframe(df)
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Summary')
+        
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v54.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        
+    except Exception as e:
+        st.error(f"系統錯誤: {e}")

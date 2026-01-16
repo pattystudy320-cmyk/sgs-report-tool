@@ -57,6 +57,17 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
+# ★ v38.0 新增：非檢測報告 (MSDS/承認書) 拒絕清單 ★
+NON_REPORT_KEYWORDS = [
+    "material safety data sheet",
+    "safety data sheet",
+    "msds",
+    "sds",
+    "specification approval",
+    "承認書",
+    "declaration of conformity"
+]
+
 OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
@@ -69,6 +80,16 @@ OUTPUT_COLUMNS = [
 def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
+
+def is_valid_test_report_file(first_page_text):
+    """
+    v38.0: 檢查第一頁是否包含 MSDS 或 承認書 的關鍵字
+    """
+    txt_lower = first_page_text.lower()
+    for kw in NON_REPORT_KEYWORDS:
+        if kw in txt_lower:
+            return False # 發現違禁字，判定為非報告
+    return True
 
 def extract_valid_report_date(text):
     lines = text.split('\n')
@@ -115,7 +136,6 @@ def extract_valid_report_date(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        # 這裡只擋大數值的 Limit，避免擋到真實結果
         if n in [1000.0, 100.0, 50.0]: return True
         return False
     except: return False
@@ -141,7 +161,7 @@ def parse_value_priority(value_str):
     if num_match:
         try:
             number = float(num_match.group(1))
-            return (3, number, val) # 回傳完整字串(含特殊符號)
+            return (3, number, val)
         except: pass
             
     return (0, 0, val)
@@ -253,7 +273,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company):
                     val_check = part.replace("▲", "").replace("△", "")
                     try:
                         f = float(val_check)
-                        if f not in [100.0, 1000.0, 50.0]:
+                        if f not in [100.0, 1000.0, 50.0, 25.0, 20.0, 10.0, 5.0, 2.0]:
                             found_val = part
                             break
                     except: pass
@@ -280,8 +300,18 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
+                # 1. 守門員檢查
+                first_page_text = ""
+                if len(pdf.pages) > 0:
+                    first_page_text = pdf.pages[0].extract_text() or ""
+                
+                # ★ v38.0: 如果不是 Test Report，直接跳過 ★
+                if not is_valid_test_report_file(first_page_text):
+                    # st.warning(f"跳過非檢測報告檔案: {filename}") 
+                    # 選擇性顯示警告，以免干擾版面
+                    continue 
+
                 file_dates = []
-                first_few_pages_text = ""
                 full_text_content = "" 
                 
                 for p_idx in range(len(pdf.pages)):
@@ -290,17 +320,15 @@ def process_files(files):
                     full_text_content += page_txt + "\n"
                     
                     if p_idx < 5:
-                        first_few_pages_text += page_txt
-                        candidates = extract_valid_report_date(page_txt)
-                        if candidates: file_dates.append(candidates)
+                        d = extract_valid_report_date(page_txt)
+                        if d: file_dates.append(d)
                 
                 if file_dates:
-                     # file_dates 裡都是 datetime 物件，選最晚的
                      all_dates.append((max(file_dates), filename))
                 
-                company = identify_company(first_few_pages_text)
+                company = identify_company(first_page_text)
                 
-                if check_pfas_in_summary(first_few_pages_text):
+                if check_pfas_in_summary(first_page_text):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
                 # 2. 引擎 A: 表格模式
@@ -328,7 +356,6 @@ def process_files(files):
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # ★ v37.0 關鍵修正: 備援掃描時嚴格過濾 MDL/Limit ★
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -338,11 +365,8 @@ def process_files(files):
                                         break
                                     if re.search(r"^\d+(\.\d+)?", cell):
                                         try:
-                                            # 增加 2, 5, 10, 20, 25 這些常見 MDL 到過濾清單
-                                            # 這樣程式就會跳過它們，繼續往左找到 ND
                                             if float(cell) in [1000, 100, 50, 25, 20, 10, 5, 2]: continue
                                         except: pass
-                                        
                                         result = cell
                                         break
                             
@@ -409,9 +433,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v37.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v37.0 最終修正版)")
-st.info("💡 v37.0：修復備援掃描誤抓 MDL (2/5) 的問題，確保 Cd/Hg 正確顯示為 N.D.。")
+st.set_page_config(page_title="SGS 報告聚合工具 v38.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v38.0)")
+st.info("💡 v38.0：新增檔案過濾機制，自動跳過 MSDS、承認書等非檢測報告檔案。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -432,7 +456,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v37.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v38.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")

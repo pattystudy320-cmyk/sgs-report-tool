@@ -26,29 +26,19 @@ SIMPLE_KEYWORDS = {
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "多溴联苯", "多溴聯苯",
-        "Monobromobiphenyl", "一溴联苯",
-        "Dibromobiphenyl", "二溴联苯",
-        "Tribromobiphenyl", "三溴联苯",
-        "Tetrabromobiphenyl", "四溴联苯",
-        "Pentabromobiphenyl", "五溴联苯",
-        "Hexabromobiphenyl", "六溴联苯",
-        "Heptabromobiphenyl", "七溴联苯",
-        "Octabromobiphenyl", "八溴联苯",
-        "Nonabromobiphenyl", "九溴联苯",
-        "Decabromobiphenyl", "十溴联苯"
+        "Monobromobiphenyl", "一溴联苯", "Dibromobiphenyl", "二溴联苯",
+        "Tribromobiphenyl", "三溴联苯", "Tetrabromobiphenyl", "四溴联苯",
+        "Pentabromobiphenyl", "五溴联苯", "Hexabromobiphenyl", "六溴联苯",
+        "Heptabromobiphenyl", "七溴联苯", "Octabromobiphenyl", "八溴联苯",
+        "Nonabromobiphenyl", "九溴联苯", "Decabromobiphenyl", "十溴联苯"
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚",
-        "Monobromodiphenyl ether", "一溴二苯醚",
-        "Dibromodiphenyl ether", "二溴二苯醚",
-        "Tribromodiphenyl ether", "三溴二苯醚",
-        "Tetrabromodiphenyl ether", "四溴二苯醚",
-        "Pentabromodiphenyl ether", "五溴二苯醚",
-        "Hexabromodiphenyl ether", "六溴二苯醚",
-        "Heptabromodiphenyl ether", "七溴二苯醚",
-        "Octabromodiphenyl ether", "八溴二苯醚",
-        "Nonabromodiphenyl ether", "九溴二苯醚",
-        "Decabromodiphenyl ether", "十溴二苯醚"
+        "Monobromodiphenyl ether", "一溴二苯醚", "Dibromodiphenyl ether", "二溴二苯醚",
+        "Tribromodiphenyl ether", "三溴二苯醚", "Tetrabromodiphenyl ether", "四溴二苯醚",
+        "Pentabromodiphenyl ether", "五溴二苯醚", "Hexabromodiphenyl ether", "六溴二苯醚",
+        "Heptabromodiphenyl ether", "七溴二苯醚", "Octabromodiphenyl ether", "八溴二苯醚",
+        "Nonabromodiphenyl ether", "九溴二苯醚", "Decabromodiphenyl ether", "十溴二苯醚"
     ]
 }
 
@@ -64,7 +54,7 @@ OUTPUT_COLUMNS = [
 ]
 
 BLACKLIST_NUMBERS = [
-    6476, 3052, 14582, 62321, 17025, 2011, 2015, 2021, 2022, 2023, 2024, 2025, 33137
+    6476, 3052, 14582, 62321, 17025, 2011, 2015, 2021, 2022, 2023, 2024, 2025
 ]
 
 # --- 2. 輔助功能 ---
@@ -110,11 +100,13 @@ def is_suspicious_limit_value(val):
         return False
     except: return False
 
-def parse_value_priority(value_str, target_key=None):
+def parse_value_priority(value_str, target_key=None, is_text_mode=False):
+    """
+    v36.3: 增加 is_text_mode 參數，針對文字模式進行更嚴格的過濾
+    """
     raw_val = clean_text(value_str)
     
-    # v36.2: 修正 - 如果移除括號後是空的，或者括號內容看起來像索引，就丟棄
-    # 例如 "1)" -> "1" -> 丟棄
+    # 移除括號雜訊 (1) -> 丟棄
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "")
     
     if "(" in raw_val: raw_val = raw_val.split("(")[0].strip()
@@ -145,8 +137,15 @@ def parse_value_priority(value_str, target_key=None):
         try:
             number = float(num_match.group(1))
             
-            if is_suspicious_limit_value(number): return (0, 0, "")
+            # 數值黑名單
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
+            
+            # v36.3: 文字模式雜訊過濾 (解決 PFOS=25, I=19)
+            # 如果是純整數，且小於 100，且是文字模式，極大概率是頁碼或日期
+            if is_text_mode and number.is_integer() and number < 100:
+                return (0, 0, "")
+
+            if is_suspicious_limit_value(number): return (0, 0, "")
 
             is_halogen = target_key in ["F", "CL", "BR", "I"]
             if not is_halogen:
@@ -180,11 +179,10 @@ def identify_columns_by_company(table, company):
     result_idx = -1
     mdl_idx = -1
     limit_idx = -1
-    cas_idx = -1 # v36.2: 新增 CAS 欄位定位
+    cas_idx = -1
     
     max_scan_rows = min(5, len(table))
     
-    # 1. 找 Item 欄
     for r in range(max_scan_rows):
         row = table[r]
         for c_idx, cell in enumerate(row):
@@ -192,7 +190,6 @@ def identify_columns_by_company(table, company):
             if "test item" in txt or "tested item" in txt or "测试项目" in txt or "substance name" in txt:
                 if item_idx == -1: item_idx = c_idx
     
-    # 2. 找 Result, MDL, Limit, CAS 欄
     for r in range(max_scan_rows):
         row = table[r]
         for c_idx, cell in enumerate(row):
@@ -201,16 +198,12 @@ def identify_columns_by_company(table, company):
             
             if "mdl" in txt or "loq" in txt or "检出限" in txt:
                 mdl_idx = c_idx
-            
             if "limit" in txt or "限值" in txt:
                 limit_idx = c_idx
                 continue
-            
-            # v36.2: 標記 CAS 欄位
             if "cas" in txt:
                 cas_idx = c_idx
                 continue
-
             if "unit" in txt or "method" in txt: continue
 
             if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "claimed" in txt:
@@ -222,6 +215,8 @@ def identify_columns_by_company(table, company):
 
     if item_idx == -1: item_idx = 0
     
+    # Fallback Logic:
+    # 如果找不到明確的 Result，且不是 Limit/MDL/CAS，則嘗試向左推
     if result_idx == -1 and len(table[0]) > 2: 
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -235,7 +230,6 @@ def identify_columns_by_company(table, company):
 # --- 4. 核心：文字模式 ---
 
 def parse_text_lines(text, data_pool, file_group_data, filename, found_elements):
-    # v36.2: 傳入 found_elements，若已在表格找到，則跳過文字搜尋
     lines = text.split('\n')
     for line in lines:
         line_clean = clean_text(line)
@@ -248,8 +242,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements)
 
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
-            # v36.2: 如果該元素已經在表格中找到，直接跳過 (防禦 Iodine = 19)
-            if key in found_elements: continue
+            if key in found_elements: continue # 如果已在表格找到，直接跳過文字掃描
 
             for kw in keywords:
                 if kw in line_clean and "test item" not in line_lower:
@@ -260,7 +253,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements)
         matched_group = None
         if not matched_simple:
             for group_key, keywords in GROUP_KEYWORDS.items():
-                # Group 比較複雜，暫時不強制鎖定，因為 PBB/PBDE 有多項
                 for kw in keywords:
                     if kw in line_clean:
                         matched_group = group_key
@@ -276,30 +268,35 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements)
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "uqt", "loq", "mdl", "---", "-"]: continue
                 
-                priority = parse_value_priority(part, target_key=matched_simple)
+                # v36.3: 標記 is_text_mode=True
+                priority = parse_value_priority(part, target_key=matched_simple, is_text_mode=True)
                 if priority[0] > 0:
                     found_val = part
                     break
             
             if found_val:
-                priority = parse_value_priority(found_val, target_key=matched_simple)
+                priority = parse_value_priority(found_val, target_key=matched_simple, is_text_mode=True)
                 if matched_simple:
-                    data_pool[matched_simple].append({"priority": priority, "filename": filename})
+                    # 標記 source=1 (Text)
+                    data_pool[matched_simple].append({"priority": priority, "filename": filename, "source": 1})
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
 # --- 主程式 ---
 
 def process_files(files):
+    # data_pool 結構更新：包含 source (2=Table, 1=Text)
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     all_dates = []
+    
+    # 追蹤器用於決定檔名，Pb 優先
     global_tracker = {key: {"max_score": -1, "max_value": -1.0, "filename": ""} for key in SIMPLE_KEYWORDS.keys()}
     progress_bar = st.progress(0)
     
     for i, file in enumerate(files):
         filename = file.name
         file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
-        found_elements_in_table = set() # v36.2: 記錄此檔案中，哪些元素已經在表格抓到了
+        found_elements_in_table = set()
         
         try:
             with pdfplumber.open(file) as pdf:
@@ -317,15 +314,15 @@ def process_files(files):
                 company = identify_company(full_text_content[:2000])
                 
                 if check_pfas_in_summary(full_text_content[:2000]):
-                    data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
+                    # PFAS Summary 視為 Table 等級的權威 (4)
+                    data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename, "source": 2})
 
-                # 表格模式
+                # --- 表格模式 ---
                 for page in pdf.pages:
                     tables = page.extract_tables()
                     for table in tables:
                         if not table or len(table) < 2: continue
                         
-                        # v36.2: 獲取 cas_idx
                         item_idx, result_idx, mdl_idx, limit_idx, cas_idx = identify_columns_by_company(table, company)
                         if item_idx == -1: continue 
 
@@ -342,12 +339,9 @@ def process_files(files):
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result_cell = clean_row[result_idx]
                             
-                            # Fallback 掃描
                             if not result_cell:
                                 for col_idx, cell in enumerate(clean_row):
-                                    # v36.2: 絕對不掃描 Limit, MDL, CAS 欄位
                                     if col_idx in [limit_idx, mdl_idx, cas_idx]: continue
-                                    
                                     if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
                                         result_cell = cell
                                         break
@@ -363,7 +357,7 @@ def process_files(files):
                                         break
                                 if current_key: break
 
-                            priority = parse_value_priority(result_cell, target_key=current_key)
+                            priority = parse_value_priority(result_cell, target_key=current_key, is_text_mode=False)
                             if priority[0] == 0: continue
                             
                             # Simple Keywords
@@ -371,9 +365,9 @@ def process_files(files):
                                 for kw in keywords:
                                     if kw in item_name or kw.lower() in item_name.lower():
                                         if target_key == "PFOS" and ("related" in item_name.lower() or "derivative" in item_name.lower()): continue
-                                        data_pool[target_key].append({"priority": priority, "filename": filename})
                                         
-                                        # v36.2: 標記此元素已在表格找到
+                                        # 標記 source=2 (Table)
+                                        data_pool[target_key].append({"priority": priority, "filename": filename, "source": 2})
                                         found_elements_in_table.add(target_key)
                                         
                                         score, val, _ = priority
@@ -393,29 +387,30 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 文字模式 (v36.2: 傳入 found_elements_in_table，避免重複雜訊)
+                # --- 文字模式 ---
                 parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table)
                 
-                # 更新全局 Tracker
+                # 更新 Tracker (for filename)
                 for k in SIMPLE_KEYWORDS.keys():
                     for d in data_pool[k]:
-                         if d['filename'] == filename:
-                             p = d['priority']
-                             if p[0] > global_tracker[k]["max_score"]:
-                                 global_tracker[k]["max_score"] = p[0]
-                                 global_tracker[k]["max_value"] = p[1]
-                                 global_tracker[k]["filename"] = filename
-                             elif p[0] == global_tracker[k]["max_score"] and p[1] > global_tracker[k]["max_value"]:
-                                 global_tracker[k]["max_value"] = p[1]
-                                 global_tracker[k]["filename"] = filename
+                         p = d['priority']
+                         if p[0] > global_tracker[k]["max_score"]:
+                             global_tracker[k]["max_score"] = p[0]
+                             global_tracker[k]["max_value"] = p[1]
+                             global_tracker[k]["filename"] = filename
+                         elif p[0] == global_tracker[k]["max_score"] and p[1] > global_tracker[k]["max_value"]:
+                             global_tracker[k]["max_value"] = p[1]
+                             global_tracker[k]["filename"] = filename
 
             # 結算 Group
             for group_key, values in file_group_data.items():
                 if values:
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                    # Group 通常來自表格，暫定 source=2
                     data_pool[group_key].append({
                         "priority": best_in_file,
-                        "filename": filename
+                        "filename": filename,
+                        "source": 2 
                     })
 
         except Exception as e:
@@ -423,7 +418,7 @@ def process_files(files):
         
         progress_bar.progress((i + 1) / len(files))
 
-    # --- 最終聚合 ---
+    # --- 最終聚合 (v36.3 關鍵邏輯: Source 權重) ---
     final_row = {}
     for key in OUTPUT_COLUMNS:
         if key in ["日期", "檔案名稱"]: continue
@@ -431,7 +426,9 @@ def process_files(files):
         if not candidates:
             final_row[key] = "" 
             continue
-        best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
+        
+        # 排序權重：Source (Table=2 > Text=1) -> Priority (Val>ND) -> Value -> String
+        best_record = sorted(candidates, key=lambda x: (x.get('source', 0), x['priority'][0], x['priority'][1]), reverse=True)[0]
         final_row[key] = best_record['priority'][2]
 
     final_date_str = ""
@@ -453,9 +450,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v36.2", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v36.2 精準防護版)")
-st.error("🛠️ v36.2：修正 Cr6+ (1)、PFOS (31)、I (19) 等雜訊問題。新增表格鎖定機制，防止文字模式雜訊覆蓋正確結果。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v36.3", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v36.3 權威修正版)")
+st.error("🛠️ v36.3：修正 PFOS (25)、I (19) 等雜訊。引入「表格權威機制」：若元素在表格中已找到，將強制忽略該元素的所有文字模式雜訊，並修正 Halogen 報告的抓取邏輯。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

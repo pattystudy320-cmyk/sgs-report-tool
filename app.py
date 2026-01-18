@@ -27,7 +27,7 @@ GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
         "Polybrominated Biphenyls, PBBs", 
-        "多溴联苯之和(PBB)", # SGS 中文寫法
+        "多溴联苯之和(PBB)", "多溴联苯之和", # v38.1 新增中文總和
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
         "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
         "Nonabromobiphenyl", "Decabromobiphenyl",
@@ -36,12 +36,12 @@ GROUP_KEYWORDS = {
         "Heptabrominated biphenyl", "Octabrominated biphenyl", "Nonabrominated biphenyl", 
         "Decabrominated biphenyl",
         "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB",
-        "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯" # 中文細項
+        "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯"
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
         "Polybrominated Diphenyl Ethers, PBDEs",
-        "多溴二苯醚之和(PBDE)", # SGS 中文寫法
+        "多溴二苯醚之和(PBDE)", "多溴二苯醚之和", # v38.1 新增中文總和
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
@@ -51,7 +51,7 @@ GROUP_KEYWORDS = {
         "Heptabrominated diphenyl ether", "Octabrominated diphenyl ether", "Nonabrominated diphenyl ether", 
         "Decabrominated diphenyl ether",
         "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE",
-        "一溴二苯醚", "二溴二苯醚", "三溴二苯醚", "四溴二苯醚", "五溴二苯醚", "六溴二苯醚", "七溴二苯醚", "八溴二苯醚", "九溴二苯醚", "十溴二苯醚" # 中文細項
+        "一溴二苯醚", "二溴二苯醚", "三溴二苯醚", "四溴二苯醚", "五溴二苯醚", "六溴二苯醚", "七溴二苯醚", "八溴二苯醚", "九溴二苯醚", "十溴二苯醚"
     ]
 }
 
@@ -79,9 +79,7 @@ def clean_text(text):
 def extract_date_from_text(text):
     text = clean_text(text)
     patterns = [
-        # 中文日期格式 (v38.0 新增)
         r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
-        # 英文日期格式
         r"Date\s*[:\.]?\s*(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3})\s+(20\d{2})", 
         r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})",
         r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", 
@@ -94,8 +92,6 @@ def extract_date_from_text(text):
             try:
                 dt = None
                 full_match = match.group(0)
-                
-                # 處理中文日期
                 if "年" in full_match:
                     groups = match.groups()
                     dt = datetime(int(groups[0]), int(groups[1]), int(groups[2]))
@@ -109,7 +105,6 @@ def extract_date_from_text(text):
                             dt = datetime.strptime(clean_str, fmt)
                             break
                         except: continue
-                
                 if dt and 2000 <= dt.year <= 2030: 
                     found_dates.append(dt)
             except: continue
@@ -154,7 +149,6 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): return (0, 0, "")
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
-    
     if val in ["026", "001", "002", "003", "004", "A16", "A1", "SN1"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
@@ -234,7 +228,6 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ SGS 專用表格解析邏輯 (v38.0 中文表頭支援) """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -244,20 +237,17 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # v38.0: 增加中文關鍵字
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt: item_idx = c_idx
             if "mdl" in txt or "loq" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt or "单位" in txt: unit_idx = c_idx
             
-            # SGS 結果欄判斷
             if "result" in txt or "結果" in txt or "检测结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or re.search(r"[a-z]\d+", txt):
                 if result_idx == -1 and "cas" not in txt and "limit" not in txt and "method" not in txt:
                     result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     
-    # Fallback
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -287,7 +277,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         
         if not result_cell:
             for i, cell in enumerate(clean_row):
-                if i in [limit_idx, mdl_idx, unit_idx]: continue # 強制避開 MDL/Limit 欄位
+                if i in [limit_idx, mdl_idx, unit_idx]: continue
                 if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
                     result_cell = cell
                     break
@@ -329,11 +319,21 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
 
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
-# --- 4. 核心處理邏輯 ---
+# --- 4. 核心處理邏輯 (v38.1 鹵素排他性過濾) ---
 
 def process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table):
     current_key = None
+    item_lower = item_name.lower()
+    
     for k, v in SIMPLE_KEYWORDS.items():
+        # v38.1: 鹵素排他性檢查 (防止 F 抓到 PFOS, Br 抓到 PBB)
+        if k == "F":
+            if "perfluoro" in item_lower or "pfo" in item_lower or "全氟" in item_lower: continue
+        if k == "BR":
+            if "polybrominated" in item_lower or "pbb" in item_lower or "pbde" in item_lower or "hbcdd" in item_lower or "多溴" in item_lower: continue
+        if k == "CL":
+            if "chlorinated" in item_lower or "sccp" in item_lower or "mccp" in item_lower or "pvc" in item_lower or "氯化" in item_lower or "聚氯" in item_lower: continue
+
         for kw in v:
             if kw in item_name or kw.lower() in item_name.lower():
                 current_key = k
@@ -344,6 +344,14 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
     if priority[0] == 0: return
 
     for target_key, keywords in SIMPLE_KEYWORDS.items():
+        # 同樣執行排他性檢查
+        if target_key == "F":
+            if "perfluoro" in item_lower or "pfo" in item_lower or "全氟" in item_lower: continue
+        if target_key == "BR":
+            if "polybrominated" in item_lower or "pbb" in item_lower or "pbde" in item_lower or "hbcdd" in item_lower or "多溴" in item_lower: continue
+        if target_key == "CL":
+            if "chlorinated" in item_lower or "sccp" in item_lower or "mccp" in item_lower or "pvc" in item_lower or "氯化" in item_lower or "聚氯" in item_lower: continue
+
         for kw in keywords:
             if kw in item_name or kw.lower() in item_name.lower():
                 if target_key == "PFOS" and ("related" in item_name.lower() or "derivative" in item_name.lower()): continue
@@ -535,9 +543,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v38.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v38.0 中文版增強)")
-st.error("🛠️ v38.0：全面支援中文 SGS 報告 (解決日期與數值誤抓問題)，並修復 F/Cl/Br/I 誤報 MDL 值的問題。保留所有英文版報告的兼容性。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v38.1", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v38.1 鹵素過濾版)")
+st.error("🛠️ v38.1：新增中文版 PBB/PBDE 總和支援 (多溴聯苯之和)。針對鹵素 (F/Cl/Br) 實施嚴格排他性過濾，防止誤抓 PFOA 或 PBB 數值。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

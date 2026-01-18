@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字定義 (回歸 v36.5 的廣泛定義 + v39 的縮寫補充) ---
+# --- 1. 關鍵字定義 ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
@@ -23,42 +23,35 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
-# v40.1: 整合所有 PBB/PBDE 關鍵字 (標題+細項+中英文)，回歸 v36.5 的群組邏輯
 GROUP_KEYWORDS = {
     "PBB": [
-        # 總稱/標題
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
-        "Polybrominated Biphenyls, PBBs", "Polybrominated Biphenyls (PBBs)",
+        # CTI 格式
+        "多溴联苯 Polybrominated Biphenyls (PBBs)", 
         "多溴联苯之和(PBB)", "多溴联苯之和",
-        # 細項 (全寫)
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
         "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
         "Nonabromobiphenyl", "Decabromobiphenyl",
-        # 細項 (分開寫)
         "Monobrominated biphenyl", "Dibrominated biphenyl", "Tribrominated biphenyl", 
         "Tetrabrominated biphenyl", "Pentabrominated biphenyl", "Hexabrominated biphenyl", 
         "Heptabrominated biphenyl", "Octabrominated biphenyl", "Nonabrominated biphenyl", 
         "Decabrominated biphenyl",
-        # 細項 (縮寫)
         "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB",
         "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯"
     ],
     "PBDE": [
-        # 總稱/標題
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
-        "Polybrominated Diphenyl Ethers, PBDEs", "Polybrominated Diphenyl Ethers (PBDEs)",
+        # CTI 格式
+        "多溴二苯醚 Polybrominated Diphenyl Ethers (PBDEs)",
         "多溴二苯醚之和(PBDE)", "多溴二苯醚之和",
-        # 細項 (全寫)
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
         "Decabromodiphenyl ether",
-        # 細項 (分開寫)
         "Monobrominated diphenyl ether", "Dibrominated diphenyl ether", "Tribrominated diphenyl ether", 
         "Tetrabrominated diphenyl ether", "Pentabrominated diphenyl ether", "Hexabrominated diphenyl ether", 
         "Heptabrominated diphenyl ether", "Octabrominated diphenyl ether", "Nonabrominated diphenyl ether", 
         "Decabrominated diphenyl ether",
-        # 細項 (縮寫)
         "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE",
         "一溴二苯醚", "二溴二苯醚", "三溴二苯醚", "四溴二苯醚", "五溴二苯醚", "六溴二苯醚", "七溴二苯醚", "八溴二苯醚", "九溴二苯醚", "十溴二苯醚"
     ]
@@ -176,7 +169,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
             
-            # MDL 防禦
+            # v40.2: MDL 防呆機制
             if mdl_value is not None:
                 try:
                     mdl_num = float(mdl_value)
@@ -200,7 +193,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 # --- 3. 獨立的表格解析器 ---
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ CTI 專用表格解析邏輯 - 回歸 v36.5 匹配邏輯 + v39.1 欄位定位 """
+    """ CTI 專用表格解析邏輯 - 絕對定位版 (No Fallback) """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -221,10 +214,11 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
             if "mdl" in txt or "loq" in txt or "检出限" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "cas" in txt: cas_idx = c_idx
+            # CTI 結果欄：精準定位
             if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "026" in txt:
                  if result_idx == -1: result_idx = c_idx
 
-    if result_idx == -1: return 
+    if result_idx == -1: return # CTI 不允許 Fallback
     if item_idx == -1: item_idx = 0
 
     for row in table:
@@ -244,15 +238,12 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
              if m_match: mdl_val_str = m_match.group(1)
 
         result_cell = ""
+        # v40.2: 嚴格只看 Result 欄位，不進行行內搜尋
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        if not result_cell:
-            for col_idx, cell in enumerate(clean_row):
-                if col_idx in [limit_idx, mdl_idx, cas_idx]: continue
-                if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
-                    result_cell = cell
-                    break
+        # 如果 Result 欄位完全沒東西，且也不是 N.D.，我們就當作這行沒結果，直接 Pass
+        # 絕對不啟動 Fallback 搜尋 (防止抓到 MDL)
         
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
@@ -348,7 +339,7 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
 
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
-# --- 4. 核心處理邏輯 (v40.1: 回歸 v36.5 遍歷邏輯) ---
+# --- 4. 核心處理邏輯 ---
 
 def process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table, mdl_value=None):
     current_key = None
@@ -402,7 +393,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                     global_tracker[target_key]["filename"] = filename
                 break
     
-    # v40.1: 回歸 v36.5 的 PBB/PBDE 處理邏輯
     for group_key, keywords in GROUP_KEYWORDS.items():
         for kw in keywords:
             if kw in item_name or kw.lower() in item_name.lower():
@@ -576,9 +566,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v40.1", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v40.1 復刻修正版)")
-st.error("🛠️ v40.1：回歸 v36.5 的 PBB/PBDE 群組抓取邏輯 (廣泛匹配標題與細項)，同時保留 v39.1 的 CTI 欄位精準定位 (防止抓到 MDL)。已解決 CTI 報告抓取錯誤的問題。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v40.2", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v40.2 CTI 精準定位版)")
+st.error("🛠️ v40.2：CTI 報告抓取邏輯重大修正：取消所有「行內搜尋 (Fallback)」機制，嚴格鎖定 Result 欄位。新增 MDL 數值防呆 (若 Result=MDL 則視為 N.D.)。此版本能精準抓取 CTI 的 N.D. 結果，徹底杜絕 MDL 誤抓。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. Keywords Definition ---
+# --- 1. 關鍵字定義 ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
@@ -163,10 +163,16 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
         try:
             number = float(num_match.group(1))
             
+            # SGS 三角形豁免
             if has_flag: return (4, number, val)
+            
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
             
+            # SGS Cr6+ 特殊防禦 (Note 數值)
+            if target_key == "Cr6+" and number in [0.10, 0.13]: return (0, 0, "")
+
+            # CTI MDL 防呆 (關鍵!)
             if mdl_value is not None:
                 try:
                     mdl_num = float(mdl_value)
@@ -191,22 +197,22 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
-    CTI 解析器 v44.1 (重啟清單防禦)
-    1. 封殺清單表格: 若表頭有 'Substance Name' 且無 'Result'，跳過。
-    2. N.D. 優先: 只要行內有 N.D.，直接鎖定 N.D.。
-    3. Result 鎖定: 僅當無 N.D. 時，才看 Result 欄位。
+    CTI 專用解析器 v45.0
+    1. 封殺清單表格
+    2. 全行掃描 N.D. (防止錯位抓到 MDL)
+    3. 提取 MDL 用於數值比對防呆
     """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    # 1. 嚴格封殺清單表格 (Fix for PBB/PBDE grabbing 25 from list)
+    # 封殺清單表格
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
        ("result" not in header_text and "结果" not in header_text):
         return
 
-    item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; cas_idx = -1
+    item_idx = -1; result_idx = -1; mdl_idx = -1
     
     for r in range(max_scan_rows):
         row = table[r]
@@ -215,8 +221,6 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
             if not txt: continue
             if "test item" in txt or "测试项目" in txt or "substance name" in txt: item_idx = c_idx
             if "mdl" in txt or "loq" in txt or "检出限" in txt: mdl_idx = c_idx
-            if "limit" in txt or "限值" in txt: limit_idx = c_idx
-            if "cas" in txt: cas_idx = c_idx
             if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "026" in txt:
                  if result_idx == -1: result_idx = c_idx
 
@@ -232,6 +236,15 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         if "test item" in item_name_lower or "result" in item_name_lower: continue
         if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
 
+        # v45.0: 跳過 PBB/PBDE 大標題行，只抓細項
+        is_group_header = False
+        for gh_kw in PBB_HEADER_KEYWORDS + PBDE_HEADER_KEYWORDS:
+             if gh_kw.lower() in item_name_lower:
+                 is_group_header = True
+                 break
+        if is_group_header: continue
+
+        # 獲取 MDL
         mdl_val_str = None
         if mdl_idx != -1 and mdl_idx < len(clean_row):
              mdl_val_str = clean_text(clean_row[mdl_idx])
@@ -240,7 +253,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
 
         result_cell = ""
         
-        # 2. N.D. 優先掃描 (防止錯位)
+        # v45.0 核心: 全行掃描 N.D. (Override Logic)
         found_nd = False
         for cell in clean_row[item_idx+1:]:
             c_text = clean_text(cell).lower()
@@ -249,7 +262,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
                 found_nd = True
                 break
         
-        # 3. 只有沒找到 N.D. 且 Result 欄位有效時，才抓數字
+        # 只有在整行都沒看到 N.D. 的情況下，才去 Result 欄位抓值
         if not found_nd:
             if result_idx < len(clean_row):
                 result_cell = clean_row[result_idx]
@@ -521,7 +534,9 @@ def process_files(files):
                         else:
                             parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
                 
-                parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table, debug_logs)
+                # v45.0: Disable text mode for CTI to prevent reading noise
+                if company != "CTI":
+                    parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table, debug_logs)
                 
                 for k in SIMPLE_KEYWORDS.keys():
                     for d in data_pool[k]:
@@ -578,9 +593,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- UI ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v44.1", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v44.1 CTI 清單防禦版)")
-st.error("🛠️ v44.1：重啟 CTI 報告的「清單防禦」機制。只要表頭包含 'Substance Name' 且無 'Result'，直接跳過該表格，從源頭杜絕抓取清單編號 (如 25) 的風險。SGS 邏輯完全凍結，確保兼容性。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v45.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v45.0 CTI 終極防呆版)")
+st.error("🛠️ v45.0：CTI 報告修復完成：1. 禁用文字模式 (防止誤抓 PDF 雜訊)。2. 啟用「N.D. 優先掃描」，只要行內有 N.D. 則強制無視後續數字。3. 啟用「MDL 數值對殺」，若抓到的數字等於 MDL 則強制丟棄。徹底解決 PBB/PBDE 誤抓問題。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

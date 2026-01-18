@@ -23,11 +23,20 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
+# v45.1: 明確定義標題行關鍵字，供 CTI 解析器識別並跳過
+PBB_HEADER_KEYWORDS = [
+    "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
+    "多溴联苯之和", "Polybrominated Biphenyls (PBBs)"
+]
+
+PBDE_HEADER_KEYWORDS = [
+    "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
+    "多溴二苯醚之和", "Polybrominated Diphenyl Ethers (PBDEs)"
+]
+
+# 整合所有關鍵字供通用搜尋使用
 GROUP_KEYWORDS = {
-    "PBB": [
-        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
-        "Polybrominated Biphenyls, PBBs", "Polybrominated Biphenyls (PBBs)",
-        "多溴联苯之和(PBB)", "多溴联苯之和",
+    "PBB": PBB_HEADER_KEYWORDS + [
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
         "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
         "Nonabromobiphenyl", "Decabromobiphenyl",
@@ -38,10 +47,7 @@ GROUP_KEYWORDS = {
         "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB",
         "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯"
     ],
-    "PBDE": [
-        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
-        "Polybrominated Diphenyl Ethers, PBDEs", "Polybrominated Diphenyl Ethers (PBDEs)",
-        "多溴二苯醚之和(PBDE)", "多溴二苯醚之和",
+    "PBDE": PBDE_HEADER_KEYWORDS + [
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
@@ -197,10 +203,11 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
-    CTI 專用解析器 v45.0
+    CTI 專用解析器 v45.1
     1. 封殺清單表格
-    2. 全行掃描 N.D. (防止錯位抓到 MDL)
-    3. 提取 MDL 用於數值比對防呆
+    2. 跳過 PBB/PBDE 標題行
+    3. 全行掃描 N.D. (防止錯位)
+    4. MDL 數值對殺
     """
     header_text = ""
     max_scan_rows = min(5, len(table))
@@ -236,7 +243,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         if "test item" in item_name_lower or "result" in item_name_lower: continue
         if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
 
-        # v45.0: 跳過 PBB/PBDE 大標題行，只抓細項
+        # v45.1 Fix: 跳過 PBB/PBDE 大標題行 (現在 PBB_HEADER_KEYWORDS 已定義)
         is_group_header = False
         for gh_kw in PBB_HEADER_KEYWORDS + PBDE_HEADER_KEYWORDS:
              if gh_kw.lower() in item_name_lower:
@@ -253,7 +260,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
 
         result_cell = ""
         
-        # v45.0 核心: 全行掃描 N.D. (Override Logic)
+        # 全行掃描 N.D. (Override Logic)
         found_nd = False
         for cell in clean_row[item_idx+1:]:
             c_text = clean_text(cell).lower()
@@ -262,7 +269,6 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
                 found_nd = True
                 break
         
-        # 只有在整行都沒看到 N.D. 的情況下，才去 Result 欄位抓值
         if not found_nd:
             if result_idx < len(clean_row):
                 result_cell = clean_row[result_idx]
@@ -534,7 +540,7 @@ def process_files(files):
                         else:
                             parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
                 
-                # v45.0: Disable text mode for CTI to prevent reading noise
+                # v45.0: CTI 報告禁用文字模式
                 if company != "CTI":
                     parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table, debug_logs)
                 
@@ -593,9 +599,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- UI ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v45.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v45.0 CTI 終極防呆版)")
-st.error("🛠️ v45.0：CTI 報告修復完成：1. 禁用文字模式 (防止誤抓 PDF 雜訊)。2. 啟用「N.D. 優先掃描」，只要行內有 N.D. 則強制無視後續數字。3. 啟用「MDL 數值對殺」，若抓到的數字等於 MDL 則強制丟棄。徹底解決 PBB/PBDE 誤抓問題。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v45.1", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v45.1 修復補全版)")
+st.error("🛠️ v45.1：已修復 `NameError` 問題。CTI 報告解析邏輯現已具備：1. 禁用文字模式。2. N.D. 優先掃描。3. MDL 數值防呆。4. 跳過 PBB/PBDE 大標題行。SGS 邏輯保持不變。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

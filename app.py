@@ -101,6 +101,13 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
+# v37.1 補回遺失的 check_pfas_in_summary
+def check_pfas_in_summary(text):
+    txt_lower = text.lower()
+    for kw in PFAS_SUMMARY_KEYWORDS:
+        if kw.lower() in txt_lower: return True
+    return False
+
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
@@ -114,7 +121,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     """
     raw_val = clean_text(value_str)
     
-    if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") # 移除 (1)
+    if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") 
     if "(" in raw_val: raw_val = raw_val.split("(")[0].strip()
     
     val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
@@ -129,12 +136,11 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): return (0, 0, "")
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
-    if val in ["026", "001", "002", "003", "004"]: return (0, 0, "") # 常見樣品號
+    if val in ["026", "001", "002", "003", "004"]: return (0, 0, "") 
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
     if "negative" in val_lower or "阴性" in val_lower: return (2, 0, "NEGATIVE")
     
-    # 排除日期格式與 CAS No
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
     if re.search(r"\d{4,}-\d+", val): return (0, 0, "")
 
@@ -149,7 +155,6 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             is_halogen = target_key in ["F", "CL", "BR", "I"]
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
-                # 文字模式或不確定來源時，過濾小整數 (防 PFOS=25, I=19)
                 if not is_table_result and number.is_integer() and number < 50:
                     return (0, 0, "")
 
@@ -163,18 +168,15 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ CTI 專用表格解析邏輯 """
-    # 1. 檢查是否為清單表格 (必須有結果欄)
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    # CTI 嚴格規則：如果標題有物質名稱但沒結果，跳過
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
        ("result" not in header_text and "结果" not in header_text):
         return
 
-    # 2. 定位欄位
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; cas_idx = -1
     
     for r in range(max_scan_rows):
@@ -189,11 +191,9 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
             if "cas" in txt: cas_idx = c_idx
             if "result" in txt or "结果" in txt: result_idx = c_idx
 
-    # CTI 嚴格規則：找不到 Result 欄位就不抓
     if result_idx == -1: return 
     if item_idx == -1: item_idx = 0
 
-    # 3. 抓取數據
     for row in table:
         clean_row = [clean_text(cell) for cell in row]
         if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
@@ -207,7 +207,6 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        # CTI Fallback: 絕對不碰 Limit/MDL/CAS 欄位
         if not result_cell:
             for col_idx, cell in enumerate(clean_row):
                 if col_idx in [limit_idx, mdl_idx, cas_idx]: continue
@@ -230,12 +229,10 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             
             if "test item" in txt or "tested item" in txt or "測試項目" in txt: item_idx = c_idx
             if "mdl" in txt: mdl_idx = c_idx
-            # SGS 特徵：結果欄常是 "No.1", "001"
             if "result" in txt or "結果" in txt or re.search(r"\b(no\.|00[1-9])", txt):
                 if result_idx == -1: result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
-    # SGS Fallback: 找不到 Result 且有 MDL，通常是最後一欄
     if result_idx == -1 and len(table[0]) > 2: result_idx = len(table[0]) - 1
 
     for row in table:
@@ -249,7 +246,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         if result_idx != -1 and result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        # SGS Fallback: 找 ND
         if not result_cell:
             for cell in clean_row:
                 if "n.d." in cell.lower() or "not detected" in cell.lower():
@@ -505,9 +501,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v37.0 模組化架構版)")
-st.info("💡 v37.0：重大升級！採用模組化架構，將 CTI、SGS、通用邏輯完全分離，確保不同實驗室的規則互不衝突。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.1", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v37.1 修復版)")
+st.info("💡 v37.1：修復 'check_pfas_in_summary' 未定義錯誤。完整保留所有針對 SGS/CTI/Intertek 的專用優化邏輯。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

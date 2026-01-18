@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字定義 (v37.5: 大幅擴充 PBB/PBDE 異體字) ---
+# --- 1. 關鍵字定義 ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb"], 
@@ -25,25 +25,27 @@ SIMPLE_KEYWORDS = {
 
 GROUP_KEYWORDS = {
     "PBB": [
-        # 寫法 A: Polybromobiphenyl
+        # 標準與縮寫組合
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯",
+        "Polybrominated Biphenyls, PBBs", # Intertek 寫法
+        # 細項
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
         "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
         "Nonabromobiphenyl", "Decabromobiphenyl",
-        # 寫法 B: Brominated biphenyl (v37.5 新增)
         "Monobrominated biphenyl", "Dibrominated biphenyl", "Tribrominated biphenyl", 
         "Tetrabrominated biphenyl", "Pentabrominated biphenyl", "Hexabrominated biphenyl", 
         "Heptabrominated biphenyl", "Octabrominated biphenyl", "Nonabrominated biphenyl", 
         "Decabrominated biphenyl"
     ],
     "PBDE": [
-        # 寫法 A: Polybromodiphenyl ether
+        # 標準與縮寫組合
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚",
+        "Polybrominated Diphenyl Ethers, PBDEs", # Intertek 寫法
+        # 細項
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
         "Decabromodiphenyl ether",
-        # 寫法 B: Brominated diphenyl ether (v37.5 新增)
         "Monobrominated diphenyl ether", "Dibrominated diphenyl ether", "Tribrominated diphenyl ether", 
         "Tetrabrominated diphenyl ether", "Pentabrominated diphenyl ether", "Hexabrominated diphenyl ether", 
         "Heptabrominated diphenyl ether", "Octabrominated diphenyl ether", "Nonabrominated diphenyl ether", 
@@ -124,13 +126,6 @@ def is_suspicious_limit_value(val):
     except: return False
 
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False):
-    """
-    v37.5 核心邏輯：
-    - is_table_result=True (表格模式)：信任度高，允許小整數 (Pb=9)。
-    - is_text_mode=True (文字模式)：
-      - 如果該行有單位 (mg/kg, ppm)，視為高信心，允許小整數。
-      - 如果該行無單位，視為低信心，封鎖小整數 (防 PFOS=25, Page 9)。
-    """
     raw_val = clean_text(value_str)
     
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") 
@@ -166,10 +161,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             is_halogen = target_key in ["F", "CL", "BR", "I"]
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
-                
-                # ★ v37.5: 文字模式下的過濾邏輯
                 if is_text_mode and number.is_integer() and number < 50:
-                    # 如果不是表格結果，且被標記為低信心文字模式，則丟棄
                     return (0, 0, "")
 
             full_str = val 
@@ -377,7 +369,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
         if "directive" in line_lower and "2011/65" in line_lower: continue
         if "remark" in line_lower or "note" in line_lower: continue 
 
-        # v37.5: 單位信心檢查 (有單位=高信心，無單位=低信心)
         has_unit = any(u in line_lower for u in ["mg/kg", "ppm", "µg/cm", "%"])
         is_text_mode_strict = not has_unit 
 
@@ -408,9 +399,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "uqt", "loq", "mdl", "---", "-"]: continue
                 
-                # 傳入 is_text_mode=is_text_mode_strict
-                # 如果有單位，is_text_mode_strict=False，允許抓 9
-                # 如果無單位，is_text_mode_strict=True，過濾 9
                 priority = parse_value_priority(part, target_key=matched_simple, is_table_result=False, is_text_mode=is_text_mode_strict)
                 if priority[0] > 0:
                     found_val = part
@@ -530,9 +518,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.5", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v37.5 終極完整版)")
-st.error("🛠️ v37.5：關鍵字擴充 (PBB/PBDE 異體字) + 單位信心機制 (解決 Pb=9 抓取問題)。完美兼容 SGS 表格缺失時的文字模式抓取，同時防止抓到頁碼雜訊。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.6", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v37.6 Intertek 增強版)")
+st.error("🛠️ v37.6：新增 Intertek 專用關鍵字，修正 PBBs/PBDEs 縮寫導致的抓取遺漏問題。保留所有 SGS/CTI 的修復邏輯。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

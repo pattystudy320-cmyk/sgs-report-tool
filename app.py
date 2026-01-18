@@ -26,7 +26,8 @@ SIMPLE_KEYWORDS = {
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
-        "Polybrominated Biphenyls, PBBs", 
+        # v39.1: CTI 中英文混合格式
+        "多溴联苯 Polybrominated Biphenyls (PBBs)", 
         "多溴联苯之和(PBB)", "多溴联苯之和",
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
         "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
@@ -40,7 +41,8 @@ GROUP_KEYWORDS = {
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
-        "Polybrominated Diphenyl Ethers, PBDEs",
+        # v39.1: CTI 中英文混合格式
+        "多溴二苯醚 Polybrominated Diphenyl Ethers (PBDEs)",
         "多溴二苯醚之和(PBDE)", "多溴二苯醚之和",
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
@@ -135,7 +137,7 @@ def is_suspicious_limit_value(val):
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False):
     raw_val = clean_text(value_str)
     
-    # v39.0 特殊符號豁免
+    # v39.1: 三角形符號豁免
     has_flag = "▲" in raw_val or "△" in raw_val
     
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") 
@@ -166,17 +168,16 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
         try:
             number = float(num_match.group(1))
             
-            # v39.0: 三角形豁免
-            if has_flag:
-                return (4, number, val)
-            
+            if has_flag: return (4, number, val)
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
+            
+            # v39.1: PFOS MDL 防禦 - 如果數值太小 (如 0.01)，極可能是 MDL
+            if target_key == "PFOS" and number < 1.0: return (0, 0, "")
 
             is_halogen = target_key in ["F", "CL", "BR", "I"]
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
-                # 文字模式下嚴格過濾小整數
                 if is_text_mode and number.is_integer() and number < 50:
                     return (0, 0, "")
 
@@ -189,11 +190,13 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 # --- 3. 獨立的表格解析器 ---
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ CTI 專用表格解析邏輯 - 嚴格定位 """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
+    # 排除清單表格
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
        ("result" not in header_text and "结果" not in header_text):
         return
@@ -209,12 +212,11 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
             if "mdl" in txt or "loq" in txt or "检出限" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "cas" in txt: cas_idx = c_idx
-            # CTI 結果欄判斷增強：包含 '结果', 'result', '026' 等樣品編號
+            # CTI 結果欄：必須精準
             if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "026" in txt:
                  if result_idx == -1: result_idx = c_idx
 
-    # CTI 嚴格模式：沒結果欄就跳過
-    if result_idx == -1: return 
+    if result_idx == -1: return # CTI 不允許 Fallback
     if item_idx == -1: item_idx = 0
 
     for row in table:
@@ -227,21 +229,19 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
 
         result_cell = ""
+        # CTI: 只相信 Result 欄位
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
+        # CTI: 只有在 Result 欄位完全為空時，才嘗試找 ND (且不能碰到其他欄位)
         if not result_cell:
-            for col_idx, cell in enumerate(clean_row):
+             # 再次確認該行是否有 ND，且不在干擾欄位中
+             for col_idx, cell in enumerate(clean_row):
                 if col_idx in [limit_idx, mdl_idx, cas_idx]: continue
                 if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
                     result_cell = cell
                     break
-                # v37.5: CTI 表格模式也允許抓數字，只要不是 Limit/MDL
-                if re.match(r"^\d+(\.\d+)?$", clean_text(cell)):
-                     if not is_suspicious_limit_value(cell):
-                        result_cell = cell
-
-        # 強制傳入 is_table_result=True，保護 18 這種小整數
+        
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
@@ -563,9 +563,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.5", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v37.5 雙效修復版)")
-st.error("🛠️ v37.5：邏輯修正：SGS/CTI 表格模式中抓到的數值（即使是 18 這種小整數）將被視為高信心結果並保留。文字模式雜訊（如 19, 25）依然會被嚴格過濾。此版本同時解決了 CTI (18) 與 SGS (9) 的誤殺問題。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v39.1", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v39.1 CTI 終極完善版)")
+st.error("🛠️ v39.1：修復 CTI 報告的 PBB/PBDE (中英文混合) 抓取問題，並加入 PFOS MDL 專用過濾機制，確保不抓到 MDL 值。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

@@ -53,6 +53,7 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
+# 雜訊黑名單 (年份、常見標準號)
 BLACKLIST_NUMBERS = [
     6476, 3052, 14582, 62321, 17025, 2011, 2015, 2021, 2022, 2023, 2024, 2025
 ]
@@ -96,14 +97,18 @@ def extract_date_from_text(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        if n in [1000.0, 100.0, 50.0, 10.0, 8.0, 5.0, 2.0]: return True
+        # 這些數值如果是整數，極高機率是限值
+        if n in [1000.0, 100.0, 50.0]: return True
         return False
     except: return False
 
-def parse_value_priority(value_str, target_key=None, is_text_mode=False):
+def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False):
+    """
+    is_table_result: True 表示數值來自已確認的表格結果欄 -> 信任度高，允許小整數 (如 Pb=8)
+    is_text_mode: True 表示數值來自文字掃描 -> 信任度低，需嚴格過濾雜訊 (如 PFOS=25)
+    """
     raw_val = clean_text(value_str)
     
-    # 移除括號 (1)
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "")
     if "(" in raw_val: raw_val = raw_val.split("(")[0].strip()
     
@@ -134,18 +139,19 @@ def parse_value_priority(value_str, target_key=None, is_text_mode=False):
             number = float(num_match.group(1))
             
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
-            
-            is_halogen = target_key in ["F", "CL", "BR", "I"]
-            
-            # v36.5: 全局小整數過濾 (防止抓到序號 25, 19)
-            # 如果是非鹵素，且是 < 50 的純整數，極大概率是序號或 MDL
-            if not is_halogen and number.is_integer() and number < 50:
-                return (0, 0, "")
-
             if is_suspicious_limit_value(number): return (0, 0, "")
 
+            is_halogen = target_key in ["F", "CL", "BR", "I"]
+            
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
+                
+                # ★ 關鍵邏輯：如果是文字模式或不確定的表格欄位，過濾 < 50 的小整數
+                # 這能殺掉 PFOS 清單序號(25) 和 頁碼(19)
+                if not is_table_result and number.is_integer() and number < 50:
+                    return (0, 0, "")
+                
+                # 如果是 is_table_result=True，則保留小整數 (如 Pb=8)
 
             full_str = val 
             return (3, number, full_str)
@@ -167,7 +173,7 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. 核心：表格識別 (v36.5 強化版) ---
+# --- 3. 核心：表格識別 ---
 
 def identify_columns_by_company(table, company):
     item_idx = -1
@@ -176,16 +182,15 @@ def identify_columns_by_company(table, company):
     limit_idx = -1
     cas_idx = -1
     
-    # v36.5: 表格身分驗證 - 檢查是否為參考清單
+    # 排除清單表格 (Feature: No Result column found in header context)
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    # 如果標題包含「物質名稱」或「組名」或「CAS」，但完全沒有「結果」，則視為無效表格
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
        ("result" not in header_text and "结果" not in header_text):
-        return -1, -1, -1, -1, -1 # 直接跳過此表格
+        return -1, -1, -1, -1, -1 
 
     for r in range(max_scan_rows):
         row = table[r]
@@ -213,17 +218,18 @@ def identify_columns_by_company(table, company):
             if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "claimed" in txt:
                  if result_idx == -1: result_idx = c_idx
 
+    # 防呆：Result 不能是 MDL/Limit/CAS
     if result_idx == mdl_idx and result_idx != -1: result_idx = -1
     if result_idx == limit_idx and result_idx != -1: result_idx = -1
     if result_idx == cas_idx and result_idx != -1: result_idx = -1
 
     if item_idx == -1: item_idx = 0
     
-    # v36.5: CTI 嚴格模式 - CTI 報告必須找到明確的 Result 欄位，不允許猜測
+    # CTI 嚴格模式：沒找到 Result 就不猜測 (避免抓到清單)
     if company == "CTI" and result_idx == -1:
         return item_idx, -1, mdl_idx, limit_idx, cas_idx
 
-    # Fallback for others
+    # 其他公司 Fallback：嘗試推測最後一欄
     if result_idx == -1 and len(table[0]) > 2: 
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -275,13 +281,14 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "uqt", "loq", "mdl", "---", "-"]: continue
                 
-                priority = parse_value_priority(part, target_key=matched_simple, is_text_mode=True)
+                # 文字模式 -> is_table_result=False, is_text_mode=True
+                priority = parse_value_priority(part, target_key=matched_simple, is_table_result=False, is_text_mode=True)
                 if priority[0] > 0:
                     found_val = part
                     break
             
             if found_val:
-                priority = parse_value_priority(found_val, target_key=matched_simple, is_text_mode=True)
+                priority = parse_value_priority(found_val, target_key=matched_simple, is_table_result=False, is_text_mode=True)
                 if matched_simple:
                     data_pool[matched_simple].append({"priority": priority, "filename": filename, "source": 1})
                     debug_logs.append({
@@ -332,8 +339,8 @@ def process_files(files):
                         if not table or len(table) < 2: continue
                         
                         item_idx, result_idx, mdl_idx, limit_idx, cas_idx = identify_columns_by_company(table, company)
-                        if item_idx == -1: continue # 跳過參考清單表格
-                        if result_idx == -1: continue # CTI 嚴格模式：沒結果欄就跳過
+                        if item_idx == -1: continue 
+                        if result_idx == -1: continue 
 
                         for row in table:
                             clean_row = [clean_text(cell) for cell in row]
@@ -366,7 +373,10 @@ def process_files(files):
                                         break
                                 if current_key: break
 
-                            priority = parse_value_priority(result_cell, target_key=current_key, is_text_mode=False)
+                            # v36.7: 標記是否為「表格結果欄位」
+                            is_confirmed_table_val = (result_idx != -1 and clean_row[result_idx] == result_cell)
+                            
+                            priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_confirmed_table_val, is_text_mode=False)
                             if priority[0] == 0: continue
                             
                             # Simple Keywords
@@ -430,7 +440,7 @@ def process_files(files):
         
         progress_bar.progress((i + 1) / len(files))
 
-    # --- 最終聚合 ---
+    # --- 最終聚合 (v36.7: 恢復 Max Value 邏輯) ---
     final_row = {}
     for key in OUTPUT_COLUMNS:
         if key in ["日期", "檔案名稱"]: continue
@@ -439,8 +449,8 @@ def process_files(files):
             final_row[key] = "" 
             continue
         
-        # 權重：Source (Table=2 > Text=1) -> Priority (Val>ND) -> Value -> String
-        best_record = sorted(candidates, key=lambda x: (x.get('source', 0), x['priority'][0], x['priority'][1]), reverse=True)[0]
+        # 排序：Priority (3>1) -> Value (100>8) -> Source
+        best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1], x.get('source', 0)), reverse=True)[0]
         final_row[key] = best_record['priority'][2]
 
     final_date_str = ""
@@ -462,9 +472,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v36.5", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v36.5 CTI 終極修正版)")
-st.error("🛠️ v36.5：完全解決 PFOS (25) 與 I (19) 雜訊。新增「清單表格自動過濾」與「CTI 嚴格欄位檢查」，防止誤讀參考清單。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v36.7", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v36.7 最終修正版)")
+st.error("🛠️ v36.7：邏輯修正：恢復跨檔案「取最大值」功能 (Priority > Value > Source)。保留針對文字模式雜訊的過濾 (剔除 PFOS 清單序號 25, 頁碼 19)，同時允許表格模式抓取小數值結果 (如 Pb=8)。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -480,7 +490,7 @@ if uploaded_files:
             st.success("✅ 分析完成！")
             st.dataframe(df)
 
-            with st.expander("🕵️ 偵錯模式 (Debug Mode) - 查看數值來源"):
+            with st.expander("🕵️ 偵錯模式 (Debug Mode)"):
                 if debug_logs:
                     st.dataframe(pd.DataFrame(debug_logs))
                 else:

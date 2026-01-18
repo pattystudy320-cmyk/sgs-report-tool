@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. Keywords Definition ---
+# --- 1. 關鍵字定義 ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
@@ -23,6 +23,7 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
+# CTI/SGS 通用 PBB/PBDE 關鍵字
 PBB_HEADER_KEYWORDS = [
     "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
     "多溴联苯之和", "Polybrominated Biphenyls (PBBs)"
@@ -154,8 +155,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
     
-    # SGS sample ID filtering is handled in parser now, but keep general ones here just in case
-    if val in ["026"]: return (0, 0, "")
+    if val in ["026", "001", "002", "003", "004", "A16", "A1", "A3", "SN1"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
     if "negative" in val_lower or "阴性" in val_lower: return (2, 0, "NEGATIVE")
@@ -168,12 +168,16 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
         try:
             number = float(num_match.group(1))
             
+            # SGS 三角形豁免
             if has_flag: return (4, number, val)
             
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
             
-            # CTI MDL Logic
+            # SGS Cr6+ Note 數值過濾
+            if target_key == "Cr6+" and number in [0.10, 0.13]: return (0, 0, "")
+
+            # CTI MDL 防呆
             if mdl_value is not None:
                 try:
                     mdl_num = float(mdl_value)
@@ -203,6 +207,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
+    # 封殺清單表格
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
        ("result" not in header_text and "结果" not in header_text):
         return
@@ -262,9 +267,9 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
-    SGS Logic (v46.0 Enhanced):
-    1.  Explicitly looks for column headers like 'A1', 'A4', '001', '004' as Result columns.
-    2.  Maintains Chinese header support and Fallback logic.
+    SGS Logic (v46.0 更新版)
+    1. 新增對 A4, A16, 001 等樣品編號作為結果欄的支援
+    2. 保持中文/英文/三角形/Fallback 等原有功能
     """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
@@ -280,17 +285,17 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt or "单位" in txt: unit_idx = c_idx
             
-            # v46.0: Enhanced Result Column Detection for SGS
-            # Matches 'Result', '检测结果', or sample IDs like '001', 'A1', 'A4', 'No.1'
+            # v46.0: 增強 SGS 結果欄位識別 (A4, A1, 001)
             if "result" in txt or "結果" in txt or "检测结果" in txt or \
                re.search(r"\b(no\.|00[1-9])", txt) or \
-               re.search(r"^[aA]\d+$", txt) or \
+               re.search(r"^[a-z]\d+$", txt) or \
                re.search(r"^\d{3}$", txt):
                 if result_idx == -1 and "cas" not in txt and "limit" not in txt and "method" not in txt:
                     result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     
+    # SGS Fallback
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -320,6 +325,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         if result_idx != -1 and result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
+        # SGS Fallback: 允許行內搜尋
         if not result_cell:
             for i, cell in enumerate(clean_row):
                 if i in [limit_idx, mdl_idx, unit_idx]: continue
@@ -333,7 +339,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         process_row_data(clean_item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ Generic Logic """
     item_idx = -1; result_idx = -1
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -595,8 +600,8 @@ def process_files(files):
 
 # --- UI ---
 st.set_page_config(page_title="SGS/CTI 報告聚合工具 v46.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v46.0 SGS 增強版)")
-st.error("🛠️ v46.0：SGS 邏輯升級：新增對 'A' 開頭樣品編號 (如 A1, A4, 004) 作為結果欄位的識別能力。這解決了部分 SGS 報告未明確標示 'Result' 欄位導致的抓取失敗問題，同時保持 CTI 與 Intertek 邏輯穩定不變。")
+st.title("📄 萬用型檢測報告聚合工具 (v46.0 SGS A4標題版)")
+st.error("🛠️ v46.0：針對 SGS 報告中以 'A4', 'A1' 等樣品編號作為結果欄位標題的情況進行了修復，確保能正確識別並抓取數據。CTI 邏輯保持 v45.1 的高強度防呆狀態。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

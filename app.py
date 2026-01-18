@@ -17,7 +17,7 @@ SIMPLE_KEYWORDS = {
     "DBP": ["DBP", "Dibutyl phthalate", "邻苯二甲酸二丁酯"],
     "DIBP": ["DIBP", "Diisobutyl phthalate", "邻苯二甲酸二异丁酯"],
     "PFOS": ["Perfluorooctane sulfonates", "PFOS", "全氟辛烷磺酸"],
-    # v38.2: 鹵素強制匹配括號特徵，提高準確度
+    # 鹵素關鍵字 (維持原樣，依靠後續邏輯進行排他)
     "F": ["Fluorine", "氟", "(F)"],
     "CL": ["Chlorine", "氯", "(Cl)"],
     "BR": ["Bromine", "溴", "(Br)"],
@@ -150,7 +150,6 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): return (0, 0, "")
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
-    
     if val in ["026", "001", "002", "003", "004", "A16", "A1", "A3", "SN1"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
@@ -170,6 +169,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             is_halogen = target_key in ["F", "CL", "BR", "I"]
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
+                # 文字模式下，嚴格過濾小整數
                 if is_text_mode and number.is_integer() and number < 50:
                     return (0, 0, "")
 
@@ -321,27 +321,21 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
 
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
-# --- 4. 核心處理邏輯 (v38.2 鹵素強制括號檢查) ---
+# --- 4. 核心處理邏輯 (v38.3 鹵素排他性過濾) ---
 
 def process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table):
     current_key = None
     item_lower = item_name.lower()
     
     for k, v in SIMPLE_KEYWORDS.items():
-        # v38.2: 鹵素嚴格檢查 - 必須包含括號特徵 (F), (Cl)
-        if k in ["F", "CL", "BR", "I"]:
-            if k == "F" and "(f)" not in item_name and "fluorine" not in item_lower and "氟" not in item_name: continue
-            if k == "CL" and "(cl)" not in item_name and "chlorine" not in item_lower and "氯" not in item_name: continue
-            if k == "BR" and "(br)" not in item_name and "bromine" not in item_lower and "溴" not in item_name: continue
-            if k == "I" and "(i)" not in item_name and "iodine" not in item_lower and "碘" not in item_name: continue
-
-        # v38.2: 鹵素排他性 - 防止抓到 PFOA/PBB
-        if k == "F":
-            if "perfluoro" in item_lower or "pfo" in item_lower or "全氟" in item_lower: continue
+        # v38.3: 鹵素嚴格排他 (防止一溴聯苯被當成 Br)
+        # 如果要找 Br，項目名稱中絕對不能出現 '聯苯', '苯醚', 'HBCDD' 等
         if k == "BR":
-            if "polybrominated" in item_lower or "pbb" in item_lower or "pbde" in item_lower or "hbcdd" in item_lower or "多溴" in item_lower: continue
+            if any(x in item_lower for x in ["poly", "biphenyl", "ether", "hbcdd", "tbbp", "联苯", "二苯醚", "环十二烷", "双酚"]): continue
         if k == "CL":
-            if "chlorinated" in item_lower or "sccp" in item_lower or "mccp" in item_lower or "pvc" in item_lower or "氯化" in item_lower or "聚氯" in item_lower: continue
+            if any(x in item_lower for x in ["paraffin", "pvc", "chlorinated", "sccp", "mccp", "氯化", "聚氯"]): continue
+        if k == "F":
+             if any(x in item_lower for x in ["perfluoro", "pfo", "全氟"]): continue
 
         for kw in v:
             if kw in item_name or kw.lower() in item_lower:
@@ -353,11 +347,14 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
     if priority[0] == 0: return
 
     for target_key, keywords in SIMPLE_KEYWORDS.items():
-        # Double Check for safety
-        if target_key in ["F", "CL", "BR", "I"]:
-            if target_key == "F" and ("perfluoro" in item_lower or "pfo" in item_lower): continue
-            if target_key == "BR" and ("pbb" in item_lower or "pbde" in item_lower): continue
-        
+        # Double Check in assignment loop
+        if target_key == "BR":
+            if any(x in item_lower for x in ["poly", "biphenyl", "ether", "hbcdd", "tbbp", "联苯", "二苯醚", "环十二烷", "双酚"]): continue
+        if target_key == "CL":
+             if any(x in item_lower for x in ["paraffin", "pvc", "chlorinated", "sccp", "mccp", "氯化", "聚氯"]): continue
+        if target_key == "F":
+             if any(x in item_lower for x in ["perfluoro", "pfo", "全氟"]): continue
+
         for kw in keywords:
             if kw in item_name or kw.lower() in item_name.lower():
                 if target_key == "PFOS" and ("related" in item_name.lower() or "derivative" in item_name.lower()): continue
@@ -407,9 +404,10 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
         for key, keywords in SIMPLE_KEYWORDS.items():
             if key in found_elements: continue 
             
-            # v38.2: 文字模式也實施鹵素排他性檢查
+            # v38.3: 文字模式也實施鹵素排他性檢查
+            if key == "BR":
+                if any(x in line_lower for x in ["poly", "biphenyl", "ether", "hbcdd", "tbbp", "联苯", "二苯醚", "环十二烷", "双酚"]): continue
             if key == "F" and ("pfo" in line_lower or "全氟" in line_lower): continue
-            if key == "BR" and ("pbb" in line_lower or "pbde" in line_lower): continue
             
             for kw in keywords:
                 if kw in line_clean and "test item" not in line_lower:
@@ -554,9 +552,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v38.2", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v38.2 鹵素特徵版)")
-st.error("🛠️ v38.2：鹵素檢測邏輯升級：強制匹配括號特徵 (F), (Cl), (Br), (I) 且排除全氟/多溴等干擾詞。新增中文版 PBB/PBDE 總和支援。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v38.3", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v38.3 鹵素精準過濾版)")
+st.error("🛠️ v38.3：解決 PBB/PBDE 細項（如 '一溴聯苯'）誤抓為鹵素 (Br) 的問題。針對 F/Cl/Br 實施嚴格的化合物排他過濾，確保只抓取單質鹵素檢測結果。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

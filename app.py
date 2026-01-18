@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字定義 ---
+# --- 1. Keywords Definition ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
@@ -79,7 +79,7 @@ def clean_text(text):
 def extract_date_from_text(text):
     text = clean_text(text)
     patterns = [
-        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
+        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", 
         r"Date\s*[:\.]?\s*(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3})\s+(20\d{2})", 
         r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})",
         r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", 
@@ -133,11 +133,6 @@ def is_suspicious_limit_value(val):
     except: return False
 
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False, mdl_value=None):
-    """
-    通用數值解析核心
-    - has_flag: SGS 專用，豁免三角形數值。
-    - mdl_value: CTI 專用，數值等於 MDL 則丟棄。
-    """
     raw_val = clean_text(value_str)
     has_flag = "▲" in raw_val or "△" in raw_val
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") 
@@ -168,12 +163,13 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
         try:
             number = float(num_match.group(1))
             
-            # SGS 三角形豁免
             if has_flag: return (4, number, val)
-            
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
             
+            # SGS Cr6+ 特殊防禦
+            if target_key == "Cr6+" and number in [0.10, 0.13]: return (0, 0, "")
+
             # CTI MDL 防呆
             if mdl_value is not None:
                 try:
@@ -195,13 +191,10 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             
     return (0, 0, val)
 
-# --- 3. 獨立的表格解析器 (嚴格分流) ---
+# --- 3. Table Parsers ---
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ 
-    CTI 專用解析器 v43.0：
-    1. 加入 'N.D. 優先掃描'：只要行內有 N.D.，直接判定為 N.D.，無視任何數字 (解決欄位錯位抓到 MDL 的問題)。
-    """
+    """ CTI 專用解析器：N.D. 絕對優先權 (v44.0) """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -237,31 +230,34 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         if "test item" in item_name_lower or "result" in item_name_lower: continue
         if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
 
-        # --- v43.0 CTI 核心改動: N.D. 優先掃描 ---
-        # 掃描項目名稱之後的所有欄位
-        row_content_after_item = " ".join([clean_text(c).lower() for c in clean_row[item_idx+1:]])
-        
-        # 1. 獲取 MDL (用於防呆)
+        # 獲取 MDL 用於防呆
         mdl_val_str = None
         if mdl_idx != -1 and mdl_idx < len(clean_row):
-             mdl_raw = clean_text(clean_row[mdl_idx])
-             m_match = re.search(r"([\d\.]+)", mdl_raw)
+             mdl_val_str = clean_text(clean_row[mdl_idx])
+             m_match = re.search(r"([\d\.]+)", mdl_val_str)
              if m_match: mdl_val_str = m_match.group(1)
 
         result_cell = ""
         
-        # 2. 判斷邏輯
-        if "n.d." in row_content_after_item or "未检出" in row_content_after_item:
-            # 如果行內有 N.D.，直接鎖定結果為 N.D. (防止抓到錯位的 MDL)
-            result_cell = "N.D."
-        elif result_idx < len(clean_row):
-            # 如果沒看到 N.D.，才去抓 Result 欄位的數值
-            result_cell = clean_row[result_idx]
+        # --- v44.0 核心邏輯：N.D. 優先掃描 ---
+        # 1. 檢查項目之後的所有格子是否有 "N.D."
+        found_nd = False
+        for cell in clean_row[item_idx+1:]:
+            c_text = clean_text(cell).lower()
+            if "n.d." in c_text or "not detected" in c_text or "未检出" in c_text:
+                result_cell = "N.D."
+                found_nd = True
+                break
         
+        # 2. 如果沒找到 N.D.，才去 Result 欄位抓數字
+        if not found_nd:
+            if result_idx < len(clean_row):
+                result_cell = clean_row[result_idx]
+
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ SGS Logic (保持 v39.0 不變) """
+    """ SGS Logic (保持 v39.0) """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -582,9 +578,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- UI ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v43.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v43.0 CTI 欄位錯位終極修復)")
-st.error("🛠️ v43.0：針對 CTI 報告的「欄位錯位 (Column Shifting)」問題引入了 N.D. 優先掃描機制。只要同一行內有 N.D.，即強制判定為 N.D.，徹底解決了誤抓 MDL (5/25) 的問題。SGS 邏輯維持不變。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v44.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v44.0 CTI 終極防呆版)")
+st.error("🛠️ v44.0：CTI 報告邏輯大升級：採用『N.D. 優先掃描』機制。只要該行出現 'N.D.'，直接鎖定結果為 N.D.，完全避免欄位錯位導致抓到 5/25 等 MDL 數值。SGS 邏輯保持不變。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

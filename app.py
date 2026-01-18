@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. Keywords Definition ---
+# --- 1. 關鍵字定義 ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
@@ -23,6 +23,7 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
+# 整合所有廠商的 PBB/PBDE 寫法
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
@@ -70,7 +71,7 @@ BLACKLIST_NUMBERS = [
     6476, 3052, 14582, 62321, 17025, 2011, 2015, 2021, 2022, 2023, 2024, 2025
 ]
 
-# --- 2. Helper Functions ---
+# --- 2. 通用輔助功能 ---
 
 def clean_text(text):
     if not text: return ""
@@ -79,7 +80,7 @@ def clean_text(text):
 def extract_date_from_text(text):
     text = clean_text(text)
     patterns = [
-        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
+        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", 
         r"Date\s*[:\.]?\s*(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3})\s+(20\d{2})", 
         r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})",
         r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", 
@@ -133,6 +134,10 @@ def is_suspicious_limit_value(val):
     except: return False
 
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False, mdl_value=None):
+    """
+    通用數值解析核心
+    - mdl_value: CTI 專用，若數值 == MDL 則丟棄 (解決 5, 25 誤抓)
+    """
     raw_val = clean_text(value_str)
     has_flag = "▲" in raw_val or "△" in raw_val
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") 
@@ -163,13 +168,13 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
         try:
             number = float(num_match.group(1))
             
+            # SGS 三角形豁免
             if has_flag: return (4, number, val)
+            
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
             
-            # v42.1: Cr6+ 特殊防禦 - 0.10 和 0.13 是判定標準，不是結果
-            if target_key == "Cr6+" and number in [0.10, 0.13]: return (0, 0, "")
-
+            # ★ CTI 專屬修復：如果抓到的數值 == MDL，視為誤抓，強制丟棄
             if mdl_value is not None:
                 try:
                     mdl_num = float(mdl_value)
@@ -190,15 +195,20 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             
     return (0, 0, val)
 
-# --- 3. Table Parsers ---
+# --- 3. 獨立的表格解析器 (嚴格分流) ---
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ CTI Strict Logic """
+    """ 
+    CTI 專用解析器：
+    1. 嚴格鎖定 Result 欄位 (禁止 Fallback)
+    2. 抓取 MDL 欄位數值，用於防呆
+    """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
+    # 排除清單
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
        ("result" not in header_text and "结果" not in header_text):
         return
@@ -214,10 +224,11 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
             if "mdl" in txt or "loq" in txt or "检出限" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "cas" in txt: cas_idx = c_idx
+            # CTI 結果欄
             if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "026" in txt:
                  if result_idx == -1: result_idx = c_idx
 
-    if result_idx == -1: return 
+    if result_idx == -1: return # CTI 無結果欄則跳過
     if item_idx == -1: item_idx = 0
 
     for row in table:
@@ -229,27 +240,29 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         if "test item" in item_name_lower or "result" in item_name_lower: continue
         if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
 
+        # ★ 獲取該行的 MDL 值 (用於防呆)
         mdl_val_str = None
         if mdl_idx != -1 and mdl_idx < len(clean_row):
-             mdl_val_str = clean_text(clean_row[mdl_idx])
-             m_match = re.search(r"([\d\.]+)", mdl_val_str)
+             mdl_raw = clean_text(clean_row[mdl_idx])
+             m_match = re.search(r"([\d\.]+)", mdl_raw)
              if m_match: mdl_val_str = m_match.group(1)
 
         result_cell = ""
+        # 嚴格只看 Result 欄
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        if not result_cell:
-            for col_idx, cell in enumerate(clean_row):
-                if col_idx in [limit_idx, mdl_idx, cas_idx]: continue
-                if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
-                    result_cell = cell
-                    break
-        
+        # CTI 不進行 Fallback 搜尋
+        # 傳入 mdl_value 參數，讓核心邏輯進行比對
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ SGS Logic """
+    """ 
+    SGS 專用解析器 (保留 v39.0 的成功邏輯)：
+    1. 支援中文表頭
+    2. 支援 Fallback 猜測 (SGS 排版多變)
+    3. 不傳入 mdl_value (避免誤殺 SGS 的有效小數值)
+    """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -270,6 +283,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
 
     if item_idx == -1: item_idx = 0
     
+    # SGS Fallback
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -291,16 +305,16 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
         
         item_name = clean_row[item_idx]
-        
-        # v42.1: Clean item name of triangles
+        # v42.0: 移除項目名稱中的三角形，方便匹配
         clean_item_name = item_name.replace("▼", "").replace("▲", "").strip()
-        
+
         if "test item" in item_name.lower() or "result" in item_name.lower() or "limit" in item_name.lower() or "检测项目" in item_name: continue
         
         result_cell = ""
         if result_idx != -1 and result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
+        # SGS Fallback: 允許行內搜尋
         if not result_cell:
             for i, cell in enumerate(clean_row):
                 if i in [limit_idx, mdl_idx, unit_idx]: continue
@@ -311,9 +325,11 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
                      if not is_suspicious_limit_value(cell):
                         result_cell = cell
 
+        # SGS: 不傳入 mdl_value，保持最高兼容性
         process_row_data(clean_item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ 通用解析器 (Intertek 等) """
     item_idx = -1; result_idx = -1
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -345,13 +361,14 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
 
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
-# --- 4. Core Logic ---
+# --- 4. 核心處理邏輯 ---
 
 def process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table, mdl_value=None):
     current_key = None
     item_lower = item_name.lower()
     
     for k, v in SIMPLE_KEYWORDS.items():
+        # 鹵素排他性
         if k == "BR":
             if any(x in item_lower for x in ["poly", "biphenyl", "ether", "hbcdd", "tbbp", "联苯", "二苯醚", "环十二烷", "双酚"]): continue
         if k == "CL":
@@ -365,6 +382,7 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
         if current_key: break
 
+    # 傳入 mdl_value 進行 CTI 防呆
     priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False, mdl_value=mdl_value)
     if priority[0] == 0: return
 
@@ -405,7 +423,7 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 file_group_data[group_key].append(priority)
                 break
 
-# --- 5. Text Mode ---
+# --- 5. 文字模式解析 ---
 
 def parse_text_lines(text, data_pool, file_group_data, filename, found_elements, debug_logs):
     lines = text.split('\n')
@@ -469,7 +487,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
-# --- Main ---
+# --- 主程式 ---
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
@@ -572,9 +590,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- UI ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v42.1", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v42.1 符號優化版)")
-st.error("🛠️ v42.1：針對 SGS 報告中項目名稱包含特殊符號 (如 ▼) 導致匹配失敗的問題進行了修復，同時保留對結果欄位中特殊符號 (▲) 的識別與豁免。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v42.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v42.0 完美分流版)")
+st.error("🛠️ v42.0：實施「邏輯分流」策略：SGS 報告沿用 v39.0 的完美邏輯 (支援中文、三角形豁免、Fallback)；CTI 報告使用 v41.0 的嚴格邏輯 (鎖定 Result 欄位、MDL 防呆)，互不干擾。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

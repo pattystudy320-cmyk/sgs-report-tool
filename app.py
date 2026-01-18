@@ -21,8 +21,8 @@ SIMPLE_KEYWORDS = {
     "CL": ["Chlorine", "氯", "(Cl)"],
     "BR": ["Bromine", "溴", "(Br)"],
     "I": ["Iodine", "碘", "(I)"],
-    "Be": ["Beryllium", "铍", "Be"], # Ur Hongxin specific
-    "Sb": ["Antimony", "锑", "Sb"]   # Ur Hongxin specific
+    "Be": ["Beryllium", "铍", "Be"], # 導致 SGS 崩潰的元兇，已修復
+    "Sb": ["Antimony", "锑", "Sb"]
 }
 
 PBB_HEADER_KEYWORDS = [
@@ -69,6 +69,7 @@ OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
     "PFOS", "PFAS", "F", "CL", "BR", "I", 
+    "Be", "Sb", # v49.1: 新增欄位，防止 KeyError 崩潰
     "日期", "檔案名稱"
 ]
 
@@ -122,7 +123,7 @@ def extract_date_from_text(text):
 
 def identify_company(text):
     txt = text.lower()
-    if "sgs" in txt: return "SGS" # Correctly ID SGS
+    if "sgs" in txt: return "SGS"
     if "urhongxin" in txt or "优尔鸿信" in txt: return "URHONGXIN"
     if "intertek" in txt: return "INTERTEK"
     if "cti" in txt or "centre testing" in txt or "华测检测" in txt: return "CTI"
@@ -160,7 +161,6 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
     
-    # SGS Sample ID filtering: 注意不要過濾掉 "A4" 這種表頭，這裡是過濾值，但我們解析值的時候是抓取內容
     if val in ["026", "001", "002", "003", "004", "A16", "A1", "A3", "SN1"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
@@ -175,19 +175,15 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             number = float(num_match.group(1))
             
             if has_flag: return (4, number, val)
-            
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
             
-            # SGS Cr6+ Note Protection
             if target_key == "Cr6+" and number in [0.10, 0.13]: return (0, 0, "")
 
-            # CTI PBB/PBDE Protection: 
-            # 如果是 CTI 且 項目是 PBB/PBDE，且數值是 5, 10, 25 (常見 MDL)，強制視為 N.D.
+            # CTI MDL 強制過濾
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
-            # 一般 MDL 防呆
             if mdl_value and mdl_value != "CTI_MODE":
                 try:
                     mdl_num = float(mdl_value)
@@ -211,7 +207,6 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 # --- 3. Table Parsers ---
 
 def parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ URHONGXIN Parser """
     item_idx = -1; result_idx = -1
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -238,7 +233,6 @@ def parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tr
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ CTI Parser (v49.0 Enhanced) """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -281,7 +275,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
                  break
         if is_group_header: continue
 
-        mdl_val_str = "CTI_MODE" # 啟用 CTI 專用 MDL 強制過濾 (5, 10, 25)
+        mdl_val_str = "CTI_MODE" 
         
         result_cell = ""
         found_nd = False
@@ -299,10 +293,6 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ 
-    SGS Logic (v49.0 Updated)
-    - 支援 'A' + 數字 (如 A4, A1) 作為 Result 欄位
-    """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -317,18 +307,15 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt or "单位" in txt: unit_idx = c_idx
             
-            # v49.0: 識別 SGS A4, A1, B2 等欄位
-            # 必須排除 Limit, Unit, MDL 欄位，避免誤判
-            if result_idx == -1 and c_idx not in [item_idx, mdl_idx, limit_idx, unit_idx]:
-                if "result" in txt or "結果" in txt or "检测结果" in txt or \
-                   re.search(r"\b(no\.|00[1-9])", txt) or \
-                   re.search(r"^[a-z]\d+$", txt) or \
-                   re.search(r"^\d{3}$", txt):
+            if "result" in txt or "結果" in txt or "检测结果" in txt or \
+               re.search(r"\b(no\.|00[1-9])", txt) or \
+               re.search(r"\b[a-z](?:-|\s)?\d+\b", txt) or \
+               re.search(r"^\d{3}$", txt):
+                if result_idx == -1 and "cas" not in txt and "limit" not in txt and "method" not in txt:
                     result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     
-    # SGS Fallback
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -422,10 +409,16 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
         if current_key: break
 
+    # v49.1 Crash Fix: 如果解析到的 key 不在 data_pool (即不在 OUTPUT_COLUMNS) 中，直接跳過，防止 KeyError
+    if current_key and current_key not in data_pool: return
+
     priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False, mdl_value=mdl_value)
     if priority[0] == 0: return
 
     for target_key, keywords in SIMPLE_KEYWORDS.items():
+        # 同樣檢查 Key 是否存在
+        if target_key not in data_pool: continue
+
         if target_key == "BR":
             if any(x in item_lower for x in ["poly", "biphenyl", "ether", "hbcdd", "tbbp", "联苯", "二苯醚", "环十二烷", "双酚"]): continue
         if target_key == "CL":
@@ -457,6 +450,7 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
     
     for group_key, keywords in GROUP_KEYWORDS.items():
+        if group_key not in data_pool: continue
         for kw in keywords:
             if kw in item_name or kw.lower() in item_name.lower():
                 file_group_data[group_key].append(priority)
@@ -480,6 +474,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
 
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
+            if key not in data_pool: continue
             if key in found_elements: continue 
             
             if key == "BR":
@@ -495,6 +490,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
         matched_group = None
         if not matched_simple:
             for group_key, keywords in GROUP_KEYWORDS.items():
+                if group_key not in data_pool: continue
                 for kw in keywords:
                     if kw in line_clean:
                         matched_group = group_key
@@ -529,11 +525,16 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
 # --- Main ---
 
 def process_files(files):
-    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
+    # Initialize data_pool with ALL output columns to be safe
+    data_pool = {key: [] for key in OUTPUT_COLUMNS}
+    
+    # Global tracker also needs to respect OUTPUT_COLUMNS to avoid key errors if SIMPLE_KEYWORDS has extra keys
+    # But SIMPLE_KEYWORDS is the source of truth for detection.
+    # We will filter in process_row_data.
+    global_tracker = {key: {"max_score": -1, "max_value": -1.0, "filename": ""} for key in SIMPLE_KEYWORDS.keys()}
+    
     all_dates = []
     debug_logs = []
-    
-    global_tracker = {key: {"max_score": -1, "max_value": -1.0, "filename": ""} for key in SIMPLE_KEYWORDS.keys()}
     progress_bar = st.progress(0)
     
     for i, file in enumerate(files):
@@ -574,11 +575,11 @@ def process_files(files):
                         else:
                             parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
                 
-                # v49.0: Disable text mode for CTI
                 if company != "CTI":
                     parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table, debug_logs)
                 
                 for k in SIMPLE_KEYWORDS.keys():
+                    if k not in data_pool: continue # Skip if not in output
                     for d in data_pool[k]:
                          p = d['priority']
                          if p[0] > global_tracker[k]["max_score"]:
@@ -592,11 +593,12 @@ def process_files(files):
             for group_key, values in file_group_data.items():
                 if values:
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
-                    data_pool[group_key].append({
-                        "priority": best_in_file,
-                        "filename": filename,
-                        "source": 2 
-                    })
+                    if group_key in data_pool:
+                        data_pool[group_key].append({
+                            "priority": best_in_file,
+                            "filename": filename,
+                            "source": 2 
+                        })
 
         except Exception as e:
             st.warning(f"⚠️ 檔案 {filename} 解析異常: {e}")
@@ -633,9 +635,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- UI ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v49.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v49.0 SGS A4/CTI 防呆版)")
-st.error("🛠️ v49.0：雙重重大修復：1. SGS 報告現已完整支援 'A4', 'A1' 等樣品編號表頭，確保數據不遺漏。2. CTI 報告採用 'N.D. 絕對優先' 與 'MDL 數值對殺' 雙重機制，徹底根除 MDL 誤抓問題。邏輯分流，互不干擾。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v49.1", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v49.1 關鍵錯誤修復版)")
+st.error("🛠️ v49.1：修復了因新增關鍵字 (Be, Sb) 但未更新輸出欄位而導致的 `KeyError` 崩潰問題，SGS 報告現可正常解析。同時保留對 A4 表頭的支援以及 CTI 的防呆邏輯。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

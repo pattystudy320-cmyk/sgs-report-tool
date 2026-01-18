@@ -134,9 +134,7 @@ def is_suspicious_limit_value(val):
 
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False, mdl_value=None):
     raw_val = clean_text(value_str)
-    # Check for result value flags (like ▲)
-    has_flag = "▲" in raw_val or "△" in raw_val or "▼" in raw_val
-    
+    has_flag = "▲" in raw_val or "△" in raw_val
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") 
     if "(" in raw_val and not has_flag: raw_val = raw_val.split("(")[0].strip()
     
@@ -165,13 +163,13 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
         try:
             number = float(num_match.group(1))
             
-            # v39.0 SGS: Exemption for values with triangles
             if has_flag: return (4, number, val)
-            
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
             
-            # v40.3 CTI: MDL Logic check
+            # v42.1: Cr6+ 特殊防禦 - 0.10 和 0.13 是判定標準，不是結果
+            if target_key == "Cr6+" and number in [0.10, 0.13]: return (0, 0, "")
+
             if mdl_value is not None:
                 try:
                     mdl_num = float(mdl_value)
@@ -261,8 +259,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # Sanitization for SGS Test Items to remove triangles before matching column headers
-            # Note: We don't need to sanitize header text usually, but good to be safe.
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt: item_idx = c_idx
             if "mdl" in txt or "loq" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
@@ -296,7 +292,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         
         item_name = clean_row[item_idx]
         
-        # v42.1: Clean item name of triangles for keyword matching logic
+        # v42.1: Clean item name of triangles
         clean_item_name = item_name.replace("▼", "").replace("▲", "").strip()
         
         if "test item" in item_name.lower() or "result" in item_name.lower() or "limit" in item_name.lower() or "检测项目" in item_name: continue
@@ -315,7 +311,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
                      if not is_suspicious_limit_value(cell):
                         result_cell = cell
 
-        # Pass the CLEANED item name for keyword matching
         process_row_data(clean_item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):

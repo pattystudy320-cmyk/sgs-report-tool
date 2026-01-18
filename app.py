@@ -5,13 +5,13 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字定義 ---
+# --- 1. 關鍵字定義 (v37.7: 新增 Intertek 縮寫 MonoBB, MonoBDE 等) ---
 
 SIMPLE_KEYWORDS = {
-    "Pb": ["Lead", "铅", "Pb"], 
-    "Cd": ["Cadmium", "镉", "Cd"], 
-    "Hg": ["Mercury", "汞", "Hg"],
-    "Cr6+": ["Hexavalent Chromium", "六价铬", "六價鉻", "Cr(VI)", "Chromium VI", "Cr6+"],
+    "Pb": ["Lead", "铅", "Pb", "납"], 
+    "Cd": ["Cadmium", "镉", "Cd", "카드뮴"], 
+    "Hg": ["Mercury", "汞", "Hg", "수은"], 
+    "Cr6+": ["Hexavalent Chromium", "六价铬", "六價鉻", "Cr(VI)", "Chromium VI", "Cr6+", "6가 크롬"],
     "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate", "邻苯二甲酸二(2-乙基己基)酯"],
     "BBP": ["BBP", "Butyl benzyl phthalate", "邻苯二甲酸丁苄酯"],
     "DBP": ["DBP", "Dibutyl phthalate", "邻苯二甲酸二丁酯"],
@@ -25,31 +25,40 @@ SIMPLE_KEYWORDS = {
 
 GROUP_KEYWORDS = {
     "PBB": [
-        # 標準與縮寫組合
-        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯",
-        "Polybrominated Biphenyls, PBBs", # Intertek 寫法
-        # 細項
+        # 標準全名
+        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
+        # Intertek 變體 (全名+縮寫)
+        "Polybrominated Biphenyls, PBBs", 
+        # 細項 - 標準
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
         "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
         "Nonabromobiphenyl", "Decabromobiphenyl",
+        # 細項 - 分開寫法
         "Monobrominated biphenyl", "Dibrominated biphenyl", "Tribrominated biphenyl", 
         "Tetrabrominated biphenyl", "Pentabrominated biphenyl", "Hexabrominated biphenyl", 
         "Heptabrominated biphenyl", "Octabrominated biphenyl", "Nonabrominated biphenyl", 
-        "Decabrominated biphenyl"
+        "Decabrominated biphenyl",
+        # 細項 - Intertek 縮寫 (v37.7 新增)
+        "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB",
+        "TertaBB" # 報告中可能有拼寫錯誤 (TertaBB)
     ],
     "PBDE": [
-        # 標準與縮寫組合
-        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚",
-        "Polybrominated Diphenyl Ethers, PBDEs", # Intertek 寫法
-        # 細項
+        # 標準全名
+        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
+        # Intertek 變體
+        "Polybrominated Diphenyl Ethers, PBDEs",
+        # 細項 - 標準
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
         "Decabromodiphenyl ether",
+        # 細項 - 分開寫法
         "Monobrominated diphenyl ether", "Dibrominated diphenyl ether", "Tribrominated diphenyl ether", 
         "Tetrabrominated diphenyl ether", "Pentabrominated diphenyl ether", "Hexabrominated diphenyl ether", 
         "Heptabrominated diphenyl ether", "Octabrominated diphenyl ether", "Nonabrominated diphenyl ether", 
-        "Decabrominated diphenyl ether"
+        "Decabrominated diphenyl ether",
+        # 細項 - Intertek 縮寫 (v37.7 新增)
+        "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE"
     ]
 }
 
@@ -287,8 +296,8 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
         row = table[r]
         for c_idx, cell in enumerate(row):
             txt = clean_text(cell).lower()
-            if "test item" in txt or "tested item" in txt: item_idx = c_idx
-            if "result" in txt or "claimed" in txt: result_idx = c_idx
+            if "test item" in txt or "tested item" in txt or "시험항목" in txt: item_idx = c_idx
+            if "result" in txt or "claimed" in txt or "시험결과" in txt: result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     if result_idx == -1 and len(table[0]) > 2: result_idx = len(table[0]) - 1
@@ -298,7 +307,7 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
         if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
         
         item_name = clean_row[item_idx]
-        if "test item" in item_name.lower(): continue
+        if "test item" in item_name.lower() or "test result" in item_name.lower(): continue
         
         result_cell = ""
         if result_idx != -1 and result_idx < len(clean_row):
@@ -518,9 +527,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.6", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v37.6 Intertek 增強版)")
-st.error("🛠️ v37.6：新增 Intertek 專用關鍵字，修正 PBBs/PBDEs 縮寫導致的抓取遺漏問題。保留所有 SGS/CTI 的修復邏輯。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.7", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v37.7 縮寫增強版)")
+st.error("🛠️ v37.7：關鍵字庫更新：新增 Intertek 專用縮寫 (MonoBB, MonoBDE 等)，解決 PBB/PBDE 抓取遺漏問題。保留所有其他邏輯。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

@@ -23,11 +23,12 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
+# Restored GROUP_KEYWORDS to be inclusive for both
 GROUP_KEYWORDS = {
     "PBB": [
-        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯",
-        "Polybrominated Biphenyls (PBBs)", # CTI format
-        "多溴联苯之和",
+        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
+        "Polybrominated Biphenyls, PBBs", "Polybrominated Biphenyls (PBBs)",
+        "多溴联苯之和(PBB)", "多溴联苯之和",
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
         "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
         "Nonabromobiphenyl", "Decabromobiphenyl",
@@ -39,9 +40,9 @@ GROUP_KEYWORDS = {
         "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯"
     ],
     "PBDE": [
-        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚",
-        "Polybrominated Diphenyl Ethers (PBDEs)", # CTI format
-        "多溴二苯醚之和",
+        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
+        "Polybrominated Diphenyl Ethers, PBDEs", "Polybrominated Diphenyl Ethers (PBDEs)",
+        "多溴二苯醚之和(PBDE)", "多溴二苯醚之和",
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
@@ -167,8 +168,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
             
-            # v40.3: Explicit MDL filtering for PBB/PBDE
-            # If extracted value equals the MDL value, treat as ND
+            # MDL Logic: If the extracted number matches the MDL, we discard it (assume it grabbed MDL by mistake)
             if mdl_value is not None:
                 try:
                     mdl_num = float(mdl_value)
@@ -189,13 +189,10 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             
     return (0, 0, val)
 
-# --- 3. Table Parsers ---
+# --- 3. Strict Table Parsers ---
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ 
-    CTI Specific Table Parser - Strict Column Locking
-    v40.3: Enforces strictly looking at the 'Result' column.
-    """
+    """ CTI Strict Logic: Only look at 'Result' column. Do NOT fallback. """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -216,11 +213,10 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
             if "mdl" in txt or "loq" in txt or "检出限" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "cas" in txt: cas_idx = c_idx
-            # Strict Result Column Detection
             if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "026" in txt:
                  if result_idx == -1: result_idx = c_idx
 
-    # If we can't find a result column, abort for this table.
+    # If CTI and no result column, SKIP. Do not guess.
     if result_idx == -1: return 
     if item_idx == -1: item_idx = 0
 
@@ -233,25 +229,26 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         if "test item" in item_name_lower or "result" in item_name_lower: continue
         if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
 
-        # Extract MDL value for this row to compare later
+        # Extract MDL value from the MDL column if it exists
         mdl_val_str = None
         if mdl_idx != -1 and mdl_idx < len(clean_row):
-             mdl_raw = clean_text(clean_row[mdl_idx])
-             m_match = re.search(r"([\d\.]+)", mdl_raw)
+             mdl_val_str = clean_text(clean_row[mdl_idx])
+             m_match = re.search(r"([\d\.]+)", mdl_val_str)
              if m_match: mdl_val_str = m_match.group(1)
 
         result_cell = ""
-        # STRICT LOOKUP: Only check the identified Result column
+        # STRICT: Only look at result_idx
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        # If the result cell is completely empty, it might be a header row or merged cell issue.
-        # In CTI reports, real results are almost never empty (they are N.D. or numbers).
-        # We do NOT fallback to other columns to avoid grabbing MDL.
+        # In CTI, if result_cell is empty or not found in the explicit column, we consider it invalid.
+        # We do NOT search other columns.
         
+        # Note: We pass mdl_val_str to the parser to avoid grabbing the MDL value as result
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ SGS Logic: Supports variable headers and fallbacks as SGS reports are less consistent. """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -272,6 +269,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
 
     if item_idx == -1: item_idx = 0
     
+    # SGS Fallback: Try to find a column that looks like results if explicit header not found
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -295,10 +293,18 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         item_name = clean_row[item_idx]
         if "test item" in item_name.lower() or "result" in item_name.lower() or "limit" in item_name.lower() or "检测项目" in item_name: continue
         
+        # Extract MDL value for checking
+        mdl_val_str = None
+        if mdl_idx != -1 and mdl_idx < len(clean_row):
+             mdl_val_str = clean_text(clean_row[mdl_idx])
+             m_match = re.search(r"([\d\.]+)", mdl_val_str)
+             if m_match: mdl_val_str = m_match.group(1)
+
         result_cell = ""
         if result_idx != -1 and result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
+        # SGS Fallback: Search row if specific cell is empty (SGS rows are sometimes misaligned)
         if not result_cell:
             for i, cell in enumerate(clean_row):
                 if i in [limit_idx, mdl_idx, unit_idx]: continue
@@ -307,9 +313,11 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
                     break
                 if re.match(r"^\d+(\.\d+)?$", clean_text(cell)):
                      if not is_suspicious_limit_value(cell):
+                        # Avoid grabbing MDL if we can identify it
+                        if mdl_val_str and cell == mdl_val_str: continue 
                         result_cell = cell
 
-        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
+        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     item_idx = -1; result_idx = -1
@@ -363,7 +371,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
         if current_key: break
 
-    # Pass mdl_value to parsing logic
     priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False, mdl_value=mdl_value)
     if priority[0] == 0: return
 
@@ -571,9 +578,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- UI ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v40.3", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v40.3 CTI 欄位鎖定版)")
-st.error("🛠️ v40.3：CTI 報告修復：嚴格鎖定 Result 欄位，禁止 Fallback 搜尋以防止誤抓 MDL (5/25)。新增 MDL 數值比對機制，若抓到的數值等於 MDL 值，則自動視為 N.D.，徹底解決 PBB/PBDE 誤判問題。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v41.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v41.0 完美分離版)")
+st.error("🛠️ v41.0：完全分離 SGS 與 CTI 邏輯。SGS 邏輯回歸到多功能 Fallback 模式以適應各種表頭；CTI 邏輯採用嚴格欄位鎖定並新增 MDL 防呆機制，徹底解決 MDL 誤抓問題，同時確保兩者互不干擾。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

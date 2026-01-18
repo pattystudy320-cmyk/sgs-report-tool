@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 定義欄位與關鍵字 ---
+# --- 1. 關鍵字定義 ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb"], 
@@ -53,12 +53,11 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
-# 雜訊黑名單 (年份、常見標準號)
 BLACKLIST_NUMBERS = [
     6476, 3052, 14582, 62321, 17025, 2011, 2015, 2021, 2022, 2023, 2024, 2025
 ]
 
-# --- 2. 輔助功能 ---
+# --- 2. 通用輔助功能 ---
 
 def clean_text(text):
     if not text: return ""
@@ -94,22 +93,28 @@ def extract_date_from_text(text):
     if found_dates: return max(found_dates)
     return None
 
+def identify_company(text):
+    txt = text.lower()
+    if "sgs" in txt: return "SGS"
+    if "intertek" in txt: return "INTERTEK"
+    if "cti" in txt or "centre testing" in txt or "华测检测" in txt: return "CTI"
+    if "tuv" in txt: return "TUV"
+    return "OTHERS"
+
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        # 這些數值如果是整數，極高機率是限值
         if n in [1000.0, 100.0, 50.0]: return True
         return False
     except: return False
 
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False):
     """
-    is_table_result: True 表示數值來自已確認的表格結果欄 -> 信任度高，允許小整數 (如 Pb=8)
-    is_text_mode: True 表示數值來自文字掃描 -> 信任度低，需嚴格過濾雜訊 (如 PFOS=25)
+    通用數值解析器
     """
     raw_val = clean_text(value_str)
     
-    if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "")
+    if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") # 移除 (1)
     if "(" in raw_val: raw_val = raw_val.split("(")[0].strip()
     
     val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
@@ -117,19 +122,19 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
-    if any(x in val_lower for x in ["iec", "iso", "epa", "gb/t", "directive", "annex", "mdl", "loq", "limit", "result", "unit", "method", "reference", "determination", "conclusion", "pass", "fail", "requirement", "---", "note", "remark"]):
-        return (0, 0, "")
+    # 關鍵字過濾
+    filter_keywords = ["iec", "iso", "epa", "gb/t", "directive", "annex", "mdl", "loq", "limit", "result", "unit", "method", "reference", "determination", "conclusion", "pass", "fail", "requirement", "---", "note", "remark"]
+    if any(x in val_lower for x in filter_keywords): return (0, 0, "")
     
-    if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): 
-        return (0, 0, "")
-
+    if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): return (0, 0, "")
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
-    if val in ["026", "001", "002"]: return (0, 0, "")
+    if val in ["026", "001", "002", "003", "004"]: return (0, 0, "") # 常見樣品號
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
     if "negative" in val_lower or "阴性" in val_lower: return (2, 0, "NEGATIVE")
     
+    # 排除日期格式與 CAS No
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
     if re.search(r"\d{4,}-\d+", val): return (0, 0, "")
 
@@ -142,16 +147,11 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if is_suspicious_limit_value(number): return (0, 0, "")
 
             is_halogen = target_key in ["F", "CL", "BR", "I"]
-            
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
-                
-                # ★ 關鍵邏輯：如果是文字模式或不確定的表格欄位，過濾 < 50 的小整數
-                # 這能殺掉 PFOS 清單序號(25) 和 頁碼(19)
+                # 文字模式或不確定來源時，過濾小整數 (防 PFOS=25, I=19)
                 if not is_table_result and number.is_integer() and number < 50:
                     return (0, 0, "")
-                
-                # 如果是 is_table_result=True，則保留小整數 (如 Pb=8)
 
             full_str = val 
             return (3, number, full_str)
@@ -159,45 +159,23 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             
     return (0, 0, val)
 
-def check_pfas_in_summary(text):
-    txt_lower = text.lower()
-    for kw in PFAS_SUMMARY_KEYWORDS:
-        if kw.lower() in txt_lower: return True
-    return False
+# --- 3. 獨立的表格解析器 (Strategy Pattern) ---
 
-def identify_company(text):
-    txt = text.lower()
-    if "sgs" in txt: return "SGS"
-    if "intertek" in txt: return "INTERTEK"
-    if "cti" in txt or "centre testing" in txt or "华测检测" in txt: return "CTI"
-    if "tuv" in txt: return "TUV"
-    return "OTHERS"
-
-# --- 3. 核心：表格識別 ---
-
-def identify_columns_by_company(table, company):
-    item_idx = -1
-    result_idx = -1
-    mdl_idx = -1
-    limit_idx = -1
-    cas_idx = -1
-    
-    # 排除清單表格 (Feature: No Result column found in header context)
+def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ CTI 專用表格解析邏輯 """
+    # 1. 檢查是否為清單表格 (必須有結果欄)
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
+    # CTI 嚴格規則：如果標題有物質名稱但沒結果，跳過
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
        ("result" not in header_text and "结果" not in header_text):
-        return -1, -1, -1, -1, -1 
+        return
 
-    for r in range(max_scan_rows):
-        row = table[r]
-        for c_idx, cell in enumerate(row):
-            txt = clean_text(cell).lower()
-            if "test item" in txt or "tested item" in txt or "测试项目" in txt or "substance name" in txt:
-                if item_idx == -1: item_idx = c_idx
+    # 2. 定位欄位
+    item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; cas_idx = -1
     
     for r in range(max_scan_rows):
         row = table[r]
@@ -205,42 +183,164 @@ def identify_columns_by_company(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            if "mdl" in txt or "loq" in txt or "检出限" in txt:
-                mdl_idx = c_idx
-            if "limit" in txt or "限值" in txt:
-                limit_idx = c_idx
-                continue
-            if "cas" in txt:
-                cas_idx = c_idx
-                continue
-            if "unit" in txt or "method" in txt: continue
+            if "test item" in txt or "测试项目" in txt or "substance name" in txt: item_idx = c_idx
+            if "mdl" in txt or "loq" in txt or "检出限" in txt: mdl_idx = c_idx
+            if "limit" in txt or "限值" in txt: limit_idx = c_idx
+            if "cas" in txt: cas_idx = c_idx
+            if "result" in txt or "结果" in txt: result_idx = c_idx
 
-            if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "claimed" in txt:
-                 if result_idx == -1: result_idx = c_idx
+    # CTI 嚴格規則：找不到 Result 欄位就不抓
+    if result_idx == -1: return 
+    if item_idx == -1: item_idx = 0
 
-    # 防呆：Result 不能是 MDL/Limit/CAS
-    if result_idx == mdl_idx and result_idx != -1: result_idx = -1
-    if result_idx == limit_idx and result_idx != -1: result_idx = -1
-    if result_idx == cas_idx and result_idx != -1: result_idx = -1
+    # 3. 抓取數據
+    for row in table:
+        clean_row = [clean_text(cell) for cell in row]
+        if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
+        
+        item_name = clean_row[item_idx]
+        item_name_lower = item_name.lower()
+        if "test item" in item_name_lower or "result" in item_name_lower: continue
+        if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
+
+        result_cell = ""
+        if result_idx < len(clean_row):
+            result_cell = clean_row[result_idx]
+        
+        # CTI Fallback: 絕對不碰 Limit/MDL/CAS 欄位
+        if not result_cell:
+            for col_idx, cell in enumerate(clean_row):
+                if col_idx in [limit_idx, mdl_idx, cas_idx]: continue
+                if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
+                    result_cell = cell
+                    break
+        
+        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
+
+def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ SGS 專用表格解析邏輯 """
+    item_idx = -1; result_idx = -1; mdl_idx = -1
+    
+    max_scan_rows = min(5, len(table))
+    for r in range(max_scan_rows):
+        row = table[r]
+        for c_idx, cell in enumerate(row):
+            txt = clean_text(cell).lower()
+            if not txt: continue
+            
+            if "test item" in txt or "tested item" in txt or "測試項目" in txt: item_idx = c_idx
+            if "mdl" in txt: mdl_idx = c_idx
+            # SGS 特徵：結果欄常是 "No.1", "001"
+            if "result" in txt or "結果" in txt or re.search(r"\b(no\.|00[1-9])", txt):
+                if result_idx == -1: result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
+    # SGS Fallback: 找不到 Result 且有 MDL，通常是最後一欄
+    if result_idx == -1 and len(table[0]) > 2: result_idx = len(table[0]) - 1
+
+    for row in table:
+        clean_row = [clean_text(cell) for cell in row]
+        if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
+        
+        item_name = clean_row[item_idx]
+        if "test item" in item_name.lower() or "result" in item_name.lower(): continue
+        
+        result_cell = ""
+        if result_idx != -1 and result_idx < len(clean_row):
+            result_cell = clean_row[result_idx]
+        
+        # SGS Fallback: 找 ND
+        if not result_cell:
+            for cell in clean_row:
+                if "n.d." in cell.lower() or "not detected" in cell.lower():
+                    result_cell = cell
+                    break
+
+        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
+
+def parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ 通用/Intertek 表格解析邏輯 """
+    item_idx = -1; result_idx = -1
     
-    # CTI 嚴格模式：沒找到 Result 就不猜測 (避免抓到清單)
-    if company == "CTI" and result_idx == -1:
-        return item_idx, -1, mdl_idx, limit_idx, cas_idx
+    max_scan_rows = min(5, len(table))
+    for r in range(max_scan_rows):
+        row = table[r]
+        for c_idx, cell in enumerate(row):
+            txt = clean_text(cell).lower()
+            if "test item" in txt or "tested item" in txt: item_idx = c_idx
+            if "result" in txt or "claimed" in txt: result_idx = c_idx
 
-    # 其他公司 Fallback：嘗試推測最後一欄
-    if result_idx == -1 and len(table[0]) > 2: 
-        candidate_idx = len(table[0]) - 1
-        while candidate_idx >= 0:
-            if candidate_idx != mdl_idx and candidate_idx != limit_idx and candidate_idx != cas_idx:
-                result_idx = candidate_idx
+    if item_idx == -1: item_idx = 0
+    if result_idx == -1 and len(table[0]) > 2: result_idx = len(table[0]) - 1
+
+    for row in table:
+        clean_row = [clean_text(cell) for cell in row]
+        if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
+        
+        item_name = clean_row[item_idx]
+        if "test item" in item_name.lower(): continue
+        
+        result_cell = ""
+        if result_idx != -1 and result_idx < len(clean_row):
+            result_cell = clean_row[result_idx]
+        
+        if not result_cell:
+            for cell in clean_row:
+                if "n.d." in cell.lower():
+                    result_cell = cell
+                    break
+
+        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
+
+# --- 4. 核心處理邏輯 (將數值填入 data_pool) ---
+
+def process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table):
+    current_key = None
+    for k, v in SIMPLE_KEYWORDS.items():
+        for kw in v:
+            if kw in item_name or kw.lower() in item_name.lower():
+                current_key = k
                 break
-            candidate_idx -= 1
+        if current_key: break
 
-    return item_idx, result_idx, mdl_idx, limit_idx, cas_idx
+    # 解析優先級
+    priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False)
+    if priority[0] == 0: return
 
-# --- 4. 核心：文字模式 ---
+    # Simple Keywords
+    for target_key, keywords in SIMPLE_KEYWORDS.items():
+        for kw in keywords:
+            if kw in item_name or kw.lower() in item_name.lower():
+                if target_key == "PFOS" and ("related" in item_name.lower() or "derivative" in item_name.lower()): continue
+                
+                data_pool[target_key].append({"priority": priority, "filename": filename, "source": 2 if is_table else 1})
+                found_elements_in_table.add(target_key)
+                
+                if debug_logs is not None:
+                    debug_logs.append({
+                        "File": filename, "Element": target_key, 
+                        "Value": result_cell, "Type": "Table" if is_table else "Text"
+                    })
+
+                # Update Tracker (for filename logic)
+                score, val, _ = priority
+                if score > global_tracker[target_key]["max_score"]:
+                    global_tracker[target_key]["max_score"] = score
+                    global_tracker[target_key]["max_value"] = val
+                    global_tracker[target_key]["filename"] = filename
+                elif score == global_tracker[target_key]["max_score"] and val > global_tracker[target_key]["max_value"]:
+                    global_tracker[target_key]["max_value"] = val
+                    global_tracker[target_key]["filename"] = filename
+                break
+    
+    # Group Keywords
+    for group_key, keywords in GROUP_KEYWORDS.items():
+        for kw in keywords:
+            if kw in item_name or kw.lower() in item_name.lower():
+                file_group_data[group_key].append(priority)
+                break
+
+# --- 5. 文字模式解析 ---
 
 def parse_text_lines(text, data_pool, file_group_data, filename, found_elements, debug_logs):
     lines = text.split('\n')
@@ -249,14 +349,13 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
         if not line_clean: continue
         
         line_lower = line_clean.lower()
-        if "test method" in line_lower or "reference to" in line_lower or "determination of" in line_lower: continue
+        if "test method" in line_lower or "reference to" in line_lower: continue
         if "directive" in line_lower and "2011/65" in line_lower: continue
         if "remark" in line_lower or "note" in line_lower: continue 
 
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
             if key in found_elements: continue 
-
             for kw in keywords:
                 if kw in line_clean and "test item" not in line_lower:
                     matched_simple = key
@@ -280,8 +379,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
             for part in reversed(parts):
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "uqt", "loq", "mdl", "---", "-"]: continue
-                
-                # 文字模式 -> is_table_result=False, is_text_mode=True
+                # 文字模式 is_text_mode=True
                 priority = parse_value_priority(part, target_key=matched_simple, is_table_result=False, is_text_mode=True)
                 if priority[0] > 0:
                     found_val = part
@@ -330,85 +428,20 @@ def process_files(files):
                 
                 if check_pfas_in_summary(full_text_content[:2000]):
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename, "source": 2})
-                    debug_logs.append({"File": filename, "Element": "PFAS", "Value": "REPORT", "Type": "Summary", "Raw": "Summary Keyword"})
+                    debug_logs.append({"File": filename, "Element": "PFAS", "Value": "REPORT", "Type": "Summary"})
 
-                # --- 表格模式 ---
+                # --- 模組化表格解析 ---
                 for page in pdf.pages:
                     tables = page.extract_tables()
                     for table in tables:
                         if not table or len(table) < 2: continue
                         
-                        item_idx, result_idx, mdl_idx, limit_idx, cas_idx = identify_columns_by_company(table, company)
-                        if item_idx == -1: continue 
-                        if result_idx == -1: continue 
-
-                        for row in table:
-                            clean_row = [clean_text(cell) for cell in row]
-                            if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
-                            
-                            item_name = clean_row[item_idx]
-                            item_name_lower = item_name.lower()
-                            if "test item" in item_name_lower or "result" in item_name_lower or "directive" in item_name_lower: continue
-                            if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
-
-                            result_cell = ""
-                            if result_idx != -1 and result_idx < len(clean_row):
-                                result_cell = clean_row[result_idx]
-                            
-                            if not result_cell:
-                                for col_idx, cell in enumerate(clean_row):
-                                    if col_idx in [limit_idx, mdl_idx, cas_idx]: continue
-                                    if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
-                                        result_cell = cell
-                                        break
-                                    if re.match(r"^\d+(\.\d+)?$", clean_text(cell)):
-                                         if not is_suspicious_limit_value(cell):
-                                            result_cell = cell
-
-                            current_key = None
-                            for k, v in SIMPLE_KEYWORDS.items():
-                                for kw in v:
-                                    if kw in item_name or kw.lower() in item_name.lower():
-                                        current_key = k
-                                        break
-                                if current_key: break
-
-                            # v36.7: 標記是否為「表格結果欄位」
-                            is_confirmed_table_val = (result_idx != -1 and clean_row[result_idx] == result_cell)
-                            
-                            priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_confirmed_table_val, is_text_mode=False)
-                            if priority[0] == 0: continue
-                            
-                            # Simple Keywords
-                            for target_key, keywords in SIMPLE_KEYWORDS.items():
-                                for kw in keywords:
-                                    if kw in item_name or kw.lower() in item_name.lower():
-                                        if target_key == "PFOS" and ("related" in item_name.lower() or "derivative" in item_name.lower()): continue
-                                        
-                                        data_pool[target_key].append({"priority": priority, "filename": filename, "source": 2})
-                                        found_elements_in_table.add(target_key)
-                                        
-                                        debug_logs.append({
-                                            "File": filename, "Element": target_key, 
-                                            "Value": result_cell, "Type": "Table", "Raw": str(clean_row)
-                                        })
-
-                                        score, val, _ = priority
-                                        if score > global_tracker[target_key]["max_score"]:
-                                            global_tracker[target_key]["max_score"] = score
-                                            global_tracker[target_key]["max_value"] = val
-                                            global_tracker[target_key]["filename"] = filename
-                                        elif score == global_tracker[target_key]["max_score"] and val > global_tracker[target_key]["max_value"]:
-                                            global_tracker[target_key]["max_value"] = val
-                                            global_tracker[target_key]["filename"] = filename
-                                        break
-                            
-                            # Group Keywords
-                            for group_key, keywords in GROUP_KEYWORDS.items():
-                                for kw in keywords:
-                                    if kw in item_name or kw.lower() in item_name.lower():
-                                        file_group_data[group_key].append(priority)
-                                        break
+                        if company == "CTI":
+                            parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
+                        elif company == "SGS":
+                            parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
+                        else:
+                            parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
                 
                 # --- 文字模式 ---
                 parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table, debug_logs)
@@ -440,7 +473,7 @@ def process_files(files):
         
         progress_bar.progress((i + 1) / len(files))
 
-    # --- 最終聚合 (v36.7: 恢復 Max Value 邏輯) ---
+    # --- 最終聚合 ---
     final_row = {}
     for key in OUTPUT_COLUMNS:
         if key in ["日期", "檔案名稱"]: continue
@@ -472,9 +505,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v36.7", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v36.7 最終修正版)")
-st.error("🛠️ v36.7：邏輯修正：恢復跨檔案「取最大值」功能 (Priority > Value > Source)。保留針對文字模式雜訊的過濾 (剔除 PFOS 清單序號 25, 頁碼 19)，同時允許表格模式抓取小數值結果 (如 Pb=8)。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v37.0 模組化架構版)")
+st.info("💡 v37.0：重大升級！採用模組化架構，將 CTI、SGS、通用邏輯完全分離，確保不同實驗室的規則互不衝突。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

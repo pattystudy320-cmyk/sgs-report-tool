@@ -135,7 +135,7 @@ def is_suspicious_limit_value(val):
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False):
     raw_val = clean_text(value_str)
     
-    # 檢查是否帶有三角形符號 (v39.0 新增)
+    # v39.0 特殊符號豁免
     has_flag = "▲" in raw_val or "△" in raw_val
     
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") 
@@ -161,15 +161,14 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
     if re.search(r"\d{4,}-\d+", val): return (0, 0, "")
 
-    # v39.0: 允許數字後面跟著符號
     num_match = re.search(r"^([\d\.]+)(.*)$", val)
     if num_match:
         try:
             number = float(num_match.group(1))
             
-            # v39.0: 如果有三角形標記，則豁免所有過濾規則 (這是絕對優先的超標值)
+            # v39.0: 三角形豁免
             if has_flag:
-                return (4, number, val) # Priority 4, 最高級別
+                return (4, number, val)
             
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
@@ -177,6 +176,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             is_halogen = target_key in ["F", "CL", "BR", "I"]
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
+                # 文字模式下嚴格過濾小整數
                 if is_text_mode and number.is_integer() and number < 50:
                     return (0, 0, "")
 
@@ -209,8 +209,11 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
             if "mdl" in txt or "loq" in txt or "检出限" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "cas" in txt: cas_idx = c_idx
-            if "result" in txt or "结果" in txt: result_idx = c_idx
+            # CTI 結果欄判斷增強：包含 '结果', 'result', '026' 等樣品編號
+            if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "026" in txt:
+                 if result_idx == -1: result_idx = c_idx
 
+    # CTI 嚴格模式：沒結果欄就跳過
     if result_idx == -1: return 
     if item_idx == -1: item_idx = 0
 
@@ -233,7 +236,12 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
                 if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
                     result_cell = cell
                     break
-        
+                # v37.5: CTI 表格模式也允許抓數字，只要不是 Limit/MDL
+                if re.match(r"^\d+(\.\d+)?$", clean_text(cell)):
+                     if not is_suspicious_limit_value(cell):
+                        result_cell = cell
+
+        # 強制傳入 is_table_result=True，保護 18 這種小整數
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
@@ -555,9 +563,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v39.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v39.0 最終豁免版)")
-st.error("🛠️ v39.0：新增超標值豁免機制 (Exemption Rule)。即使是 '186802 ▲' 這種超大數值，只要帶有三角形標記，程式就會無視過濾規則，強制抓取並完整顯示，確保異常數據不被遺漏。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.5", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v37.5 雙效修復版)")
+st.error("🛠️ v37.5：邏輯修正：SGS/CTI 表格模式中抓到的數值（即使是 18 這種小整數）將被視為高信心結果並保留。文字模式雜訊（如 19, 25）依然會被嚴格過濾。此版本同時解決了 CTI (18) 與 SGS (9) 的誤殺問題。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

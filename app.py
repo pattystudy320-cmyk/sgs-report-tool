@@ -17,7 +17,6 @@ SIMPLE_KEYWORDS = {
     "DBP": ["DBP", "Dibutyl phthalate", "邻苯二甲酸二丁酯"],
     "DIBP": ["DIBP", "Diisobutyl phthalate", "邻苯二甲酸二异丁酯"],
     "PFOS": ["Perfluorooctane sulfonates", "PFOS", "全氟辛烷磺酸"],
-    # 鹵素關鍵字 (維持原樣，依靠後續邏輯進行排他)
     "F": ["Fluorine", "氟", "(F)"],
     "CL": ["Chlorine", "氯", "(Cl)"],
     "BR": ["Bromine", "溴", "(Br)"],
@@ -136,8 +135,11 @@ def is_suspicious_limit_value(val):
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False):
     raw_val = clean_text(value_str)
     
+    # 檢查是否帶有三角形符號 (v39.0 新增)
+    has_flag = "▲" in raw_val or "△" in raw_val
+    
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") 
-    if "(" in raw_val: raw_val = raw_val.split("(")[0].strip()
+    if "(" in raw_val and not has_flag: raw_val = raw_val.split("(")[0].strip()
     
     val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
     
@@ -150,6 +152,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): return (0, 0, "")
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
+    
     if val in ["026", "001", "002", "003", "004", "A16", "A1", "A3", "SN1"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
@@ -158,10 +161,15 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
     if re.search(r"\d{4,}-\d+", val): return (0, 0, "")
 
-    num_match = re.search(r"^([\d\.]+)\s*(.*)$", val)
+    # v39.0: 允許數字後面跟著符號
+    num_match = re.search(r"^([\d\.]+)(.*)$", val)
     if num_match:
         try:
             number = float(num_match.group(1))
+            
+            # v39.0: 如果有三角形標記，則豁免所有過濾規則 (這是絕對優先的超標值)
+            if has_flag:
+                return (4, number, val) # Priority 4, 最高級別
             
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
@@ -169,7 +177,6 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             is_halogen = target_key in ["F", "CL", "BR", "I"]
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
-                # 文字模式下，嚴格過濾小整數
                 if is_text_mode and number.is_integer() and number < 50:
                     return (0, 0, "")
 
@@ -321,15 +328,13 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
 
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
-# --- 4. 核心處理邏輯 (v38.3 鹵素排他性過濾) ---
+# --- 4. 核心處理邏輯 ---
 
 def process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table):
     current_key = None
     item_lower = item_name.lower()
     
     for k, v in SIMPLE_KEYWORDS.items():
-        # v38.3: 鹵素嚴格排他 (防止一溴聯苯被當成 Br)
-        # 如果要找 Br，項目名稱中絕對不能出現 '聯苯', '苯醚', 'HBCDD' 等
         if k == "BR":
             if any(x in item_lower for x in ["poly", "biphenyl", "ether", "hbcdd", "tbbp", "联苯", "二苯醚", "环十二烷", "双酚"]): continue
         if k == "CL":
@@ -347,7 +352,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
     if priority[0] == 0: return
 
     for target_key, keywords in SIMPLE_KEYWORDS.items():
-        # Double Check in assignment loop
         if target_key == "BR":
             if any(x in item_lower for x in ["poly", "biphenyl", "ether", "hbcdd", "tbbp", "联苯", "二苯醚", "环十二烷", "双酚"]): continue
         if target_key == "CL":
@@ -404,7 +408,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
         for key, keywords in SIMPLE_KEYWORDS.items():
             if key in found_elements: continue 
             
-            # v38.3: 文字模式也實施鹵素排他性檢查
             if key == "BR":
                 if any(x in line_lower for x in ["poly", "biphenyl", "ether", "hbcdd", "tbbp", "联苯", "二苯醚", "环十二烷", "双酚"]): continue
             if key == "F" and ("pfo" in line_lower or "全氟" in line_lower): continue
@@ -552,9 +555,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v38.3", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v38.3 鹵素精準過濾版)")
-st.error("🛠️ v38.3：解決 PBB/PBDE 細項（如 '一溴聯苯'）誤抓為鹵素 (Br) 的問題。針對 F/Cl/Br 實施嚴格的化合物排他過濾，確保只抓取單質鹵素檢測結果。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v39.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v39.0 最終豁免版)")
+st.error("🛠️ v39.0：新增超標值豁免機制 (Exemption Rule)。即使是 '186802 ▲' 這種超大數值，只要帶有三角形標記，程式就會無視過濾規則，強制抓取並完整顯示，確保異常數據不被遺漏。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

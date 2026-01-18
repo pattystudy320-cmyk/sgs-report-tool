@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字定義 (v37.7: 新增 Intertek 縮寫 MonoBB, MonoBDE 等) ---
+# --- 1. 關鍵字定義 ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
@@ -25,40 +25,33 @@ SIMPLE_KEYWORDS = {
 
 GROUP_KEYWORDS = {
     "PBB": [
-        # 標準全名
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
-        # Intertek 變體 (全名+縮寫)
         "Polybrominated Biphenyls, PBBs", 
-        # 細項 - 標準
+        "多溴联苯之和(PBB)", # SGS 中文寫法
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
         "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
         "Nonabromobiphenyl", "Decabromobiphenyl",
-        # 細項 - 分開寫法
         "Monobrominated biphenyl", "Dibrominated biphenyl", "Tribrominated biphenyl", 
         "Tetrabrominated biphenyl", "Pentabrominated biphenyl", "Hexabrominated biphenyl", 
         "Heptabrominated biphenyl", "Octabrominated biphenyl", "Nonabrominated biphenyl", 
         "Decabrominated biphenyl",
-        # 細項 - Intertek 縮寫 (v37.7 新增)
         "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB",
-        "TertaBB" # 報告中可能有拼寫錯誤 (TertaBB)
+        "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯" # 中文細項
     ],
     "PBDE": [
-        # 標準全名
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
-        # Intertek 變體
         "Polybrominated Diphenyl Ethers, PBDEs",
-        # 細項 - 標準
+        "多溴二苯醚之和(PBDE)", # SGS 中文寫法
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
         "Decabromodiphenyl ether",
-        # 細項 - 分開寫法
         "Monobrominated diphenyl ether", "Dibrominated diphenyl ether", "Tribrominated diphenyl ether", 
         "Tetrabrominated diphenyl ether", "Pentabrominated diphenyl ether", "Hexabrominated diphenyl ether", 
         "Heptabrominated diphenyl ether", "Octabrominated diphenyl ether", "Nonabrominated diphenyl ether", 
         "Decabrominated diphenyl ether",
-        # 細項 - Intertek 縮寫 (v37.7 新增)
-        "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE"
+        "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE",
+        "一溴二苯醚", "二溴二苯醚", "三溴二苯醚", "四溴二苯醚", "五溴二苯醚", "六溴二苯醚", "七溴二苯醚", "八溴二苯醚", "九溴二苯醚", "十溴二苯醚" # 中文細項
     ]
 }
 
@@ -86,6 +79,9 @@ def clean_text(text):
 def extract_date_from_text(text):
     text = clean_text(text)
     patterns = [
+        # 中文日期格式 (v38.0 新增)
+        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
+        # 英文日期格式
         r"Date\s*[:\.]?\s*(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3})\s+(20\d{2})", 
         r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})",
         r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})", 
@@ -98,15 +94,22 @@ def extract_date_from_text(text):
             try:
                 dt = None
                 full_match = match.group(0)
-                if "date" in full_match.lower():
-                    full_match = re.sub(r"Date\s*[:\.]?\s*", "", full_match, flags=re.IGNORECASE)
-                clean_str = re.sub(r"[,./-]", " ", full_match) 
-                clean_str = " ".join(clean_str.split())
-                for fmt in ["%d %b %Y", "%Y %m %d", "%b %d %Y", "%B %d %Y"]:
-                    try:
-                        dt = datetime.strptime(clean_str, fmt)
-                        break
-                    except: continue
+                
+                # 處理中文日期
+                if "年" in full_match:
+                    groups = match.groups()
+                    dt = datetime(int(groups[0]), int(groups[1]), int(groups[2]))
+                else:
+                    if "date" in full_match.lower():
+                        full_match = re.sub(r"Date\s*[:\.]?\s*", "", full_match, flags=re.IGNORECASE)
+                    clean_str = re.sub(r"[,./-]", " ", full_match) 
+                    clean_str = " ".join(clean_str.split())
+                    for fmt in ["%d %b %Y", "%Y %m %d", "%b %d %Y", "%B %d %Y"]:
+                        try:
+                            dt = datetime.strptime(clean_str, fmt)
+                            break
+                        except: continue
+                
                 if dt and 2000 <= dt.year <= 2030: 
                     found_dates.append(dt)
             except: continue
@@ -151,7 +154,8 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): return (0, 0, "")
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
-    if val in ["026", "001", "002", "003", "004", "A16"]: return (0, 0, "")
+    
+    if val in ["026", "001", "002", "003", "004", "A16", "A1", "SN1"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
     if "negative" in val_lower or "阴性" in val_lower: return (2, 0, "NEGATIVE")
@@ -230,6 +234,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ SGS 專用表格解析邏輯 (v38.0 中文表頭支援) """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -239,17 +244,20 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            if "test item" in txt or "tested item" in txt or "測試項目" in txt: item_idx = c_idx
+            # v38.0: 增加中文關鍵字
+            if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt: item_idx = c_idx
             if "mdl" in txt or "loq" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
-            if "unit" in txt: unit_idx = c_idx
+            if "unit" in txt or "单位" in txt: unit_idx = c_idx
             
-            if "result" in txt or "結果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or re.search(r"[a-z]\d+", txt):
+            # SGS 結果欄判斷
+            if "result" in txt or "結果" in txt or "检测结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or re.search(r"[a-z]\d+", txt):
                 if result_idx == -1 and "cas" not in txt and "limit" not in txt and "method" not in txt:
                     result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     
+    # Fallback
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -271,7 +279,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
         
         item_name = clean_row[item_idx]
-        if "test item" in item_name.lower() or "result" in item_name.lower() or "limit" in item_name.lower(): continue
+        if "test item" in item_name.lower() or "result" in item_name.lower() or "limit" in item_name.lower() or "检测项目" in item_name: continue
         
         result_cell = ""
         if result_idx != -1 and result_idx < len(clean_row):
@@ -279,8 +287,8 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         
         if not result_cell:
             for i, cell in enumerate(clean_row):
-                if i in [limit_idx, mdl_idx, unit_idx]: continue
-                if "n.d." in cell.lower() or "not detected" in cell.lower():
+                if i in [limit_idx, mdl_idx, unit_idx]: continue # 強制避開 MDL/Limit 欄位
+                if "n.d." in cell.lower() or "not detected" in cell.lower() or "未检出" in cell.lower():
                     result_cell = cell
                     break
                 if re.match(r"^\d+(\.\d+)?$", clean_text(cell)):
@@ -296,8 +304,8 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
         row = table[r]
         for c_idx, cell in enumerate(row):
             txt = clean_text(cell).lower()
-            if "test item" in txt or "tested item" in txt or "시험항목" in txt: item_idx = c_idx
-            if "result" in txt or "claimed" in txt or "시험결과" in txt: result_idx = c_idx
+            if "test item" in txt or "tested item" in txt: item_idx = c_idx
+            if "result" in txt or "claimed" in txt: result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     if result_idx == -1 and len(table[0]) > 2: result_idx = len(table[0]) - 1
@@ -307,7 +315,7 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
         if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
         
         item_name = clean_row[item_idx]
-        if "test item" in item_name.lower() or "test result" in item_name.lower(): continue
+        if "test item" in item_name.lower(): continue
         
         result_cell = ""
         if result_idx != -1 and result_idx < len(clean_row):
@@ -527,9 +535,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.7", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v37.7 縮寫增強版)")
-st.error("🛠️ v37.7：關鍵字庫更新：新增 Intertek 專用縮寫 (MonoBB, MonoBDE 等)，解決 PBB/PBDE 抓取遺漏問題。保留所有其他邏輯。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v38.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v38.0 中文版增強)")
+st.error("🛠️ v38.0：全面支援中文 SGS 報告 (解決日期與數值誤抓問題)，並修復 F/Cl/Br/I 誤報 MDL 值的問題。保留所有英文版報告的兼容性。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

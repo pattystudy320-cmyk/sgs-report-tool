@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字定義 ---
+# --- 1. Keywords Definition ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
@@ -23,37 +23,44 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
-# 整合所有廠商的 PBB/PBDE 寫法
+# Split into Header and Sub-item keywords for logic separation
+PBB_HEADER_KEYWORDS = [
+    "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
+    "多溴联苯之和", "Polybrominated Biphenyls (PBBs)"
+]
+PBB_SUB_KEYWORDS = [
+    "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
+    "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
+    "Nonabromobiphenyl", "Decabromobiphenyl",
+    "Monobrominated biphenyl", "Dibrominated biphenyl", "Tribrominated biphenyl", 
+    "Tetrabrominated biphenyl", "Pentabrominated biphenyl", "Hexabrominated biphenyl", 
+    "Heptabrominated biphenyl", "Octabrominated biphenyl", "Nonabrominated biphenyl", 
+    "Decabrominated biphenyl",
+    "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB",
+    "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯"
+]
+
+PBDE_HEADER_KEYWORDS = [
+    "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
+    "多溴二苯醚之和", "Polybrominated Diphenyl Ethers (PBDEs)"
+]
+PBDE_SUB_KEYWORDS = [
+    "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
+    "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
+    "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
+    "Decabromodiphenyl ether",
+    "Monobrominated diphenyl ether", "Dibrominated diphenyl ether", "Tribrominated diphenyl ether", 
+    "Tetrabrominated diphenyl ether", "Pentabrominated diphenyl ether", "Hexabrominated diphenyl ether", 
+    "Heptabrominated diphenyl ether", "Octabrominated diphenyl ether", "Nonabrominated diphenyl ether", 
+    "Decabrominated diphenyl ether",
+    "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE",
+    "一溴二苯醚", "二溴二苯醚", "三溴二苯醚", "四溴二苯醚", "五溴二苯醚", "六溴二苯醚", "七溴二苯醚", "八溴二苯醚", "九溴二苯醚", "十溴二苯醚"
+]
+
+# For backward compatibility and processing
 GROUP_KEYWORDS = {
-    "PBB": [
-        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯", "폴리브롬화비페닐",
-        "Polybrominated Biphenyls, PBBs", "Polybrominated Biphenyls (PBBs)",
-        "多溴联苯之和(PBB)", "多溴联苯之和",
-        "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
-        "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
-        "Nonabromobiphenyl", "Decabromobiphenyl",
-        "Monobrominated biphenyl", "Dibrominated biphenyl", "Tribrominated biphenyl", 
-        "Tetrabrominated biphenyl", "Pentabrominated biphenyl", "Hexabrominated biphenyl", 
-        "Heptabrominated biphenyl", "Octabrominated biphenyl", "Nonabrominated biphenyl", 
-        "Decabrominated biphenyl",
-        "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB",
-        "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯"
-    ],
-    "PBDE": [
-        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚", "폴리브롬화디페닐에테르",
-        "Polybrominated Diphenyl Ethers, PBDEs", "Polybrominated Diphenyl Ethers (PBDEs)",
-        "多溴二苯醚之和(PBDE)", "多溴二苯醚之和",
-        "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
-        "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
-        "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
-        "Decabromodiphenyl ether",
-        "Monobrominated diphenyl ether", "Dibrominated diphenyl ether", "Tribrominated diphenyl ether", 
-        "Tetrabrominated diphenyl ether", "Pentabrominated diphenyl ether", "Hexabrominated diphenyl ether", 
-        "Heptabrominated diphenyl ether", "Octabrominated diphenyl ether", "Nonabrominated diphenyl ether", 
-        "Decabrominated diphenyl ether",
-        "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE",
-        "一溴二苯醚", "二溴二苯醚", "三溴二苯醚", "四溴二苯醚", "五溴二苯醚", "六溴二苯醚", "七溴二苯醚", "八溴二苯醚", "九溴二苯醚", "十溴二苯醚"
-    ]
+    "PBB": PBB_HEADER_KEYWORDS + PBB_SUB_KEYWORDS,
+    "PBDE": PBDE_HEADER_KEYWORDS + PBDE_SUB_KEYWORDS
 }
 
 PFAS_SUMMARY_KEYWORDS = [
@@ -71,7 +78,7 @@ BLACKLIST_NUMBERS = [
     6476, 3052, 14582, 62321, 17025, 2011, 2015, 2021, 2022, 2023, 2024, 2025
 ]
 
-# --- 2. 通用輔助功能 ---
+# --- 2. Helper Functions ---
 
 def clean_text(text):
     if not text: return ""
@@ -134,10 +141,6 @@ def is_suspicious_limit_value(val):
     except: return False
 
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False, mdl_value=None):
-    """
-    通用數值解析核心
-    - mdl_value: CTI 專用，若數值 == MDL 則丟棄 (解決 5, 25 誤抓)
-    """
     raw_val = clean_text(value_str)
     has_flag = "▲" in raw_val or "△" in raw_val
     if re.match(r"^[\(\[]?\d+[\)\]]$", raw_val): return (0, 0, "") 
@@ -168,13 +171,10 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
         try:
             number = float(num_match.group(1))
             
-            # SGS 三角形豁免
             if has_flag: return (4, number, val)
-            
             if int(number) in BLACKLIST_NUMBERS: return (0, 0, "")
             if is_suspicious_limit_value(number): return (0, 0, "")
             
-            # ★ CTI 專屬修復：如果抓到的數值 == MDL，視為誤抓，強制丟棄
             if mdl_value is not None:
                 try:
                     mdl_num = float(mdl_value)
@@ -195,20 +195,15 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             
     return (0, 0, val)
 
-# --- 3. 獨立的表格解析器 (嚴格分流) ---
+# --- 3. Table Parsers ---
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ 
-    CTI 專用解析器：
-    1. 嚴格鎖定 Result 欄位 (禁止 Fallback)
-    2. 抓取 MDL 欄位數值，用於防呆
-    """
+    """ CTI Strict Logic with PBB/PBDE Header Skipping """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    # 排除清單
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
        ("result" not in header_text and "结果" not in header_text):
         return
@@ -224,11 +219,10 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
             if "mdl" in txt or "loq" in txt or "检出限" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "cas" in txt: cas_idx = c_idx
-            # CTI 結果欄
             if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "026" in txt:
                  if result_idx == -1: result_idx = c_idx
 
-    if result_idx == -1: return # CTI 無結果欄則跳過
+    if result_idx == -1: return 
     if item_idx == -1: item_idx = 0
 
     for row in table:
@@ -240,29 +234,29 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         if "test item" in item_name_lower or "result" in item_name_lower: continue
         if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
 
-        # ★ 獲取該行的 MDL 值 (用於防呆)
+        # v40.0: Skip PBB/PBDE Header Rows. 
+        # CTI puts results in sub-items, not the header line.
+        is_group_header = False
+        for gh_kw in PBB_HEADER_KEYWORDS + PBDE_HEADER_KEYWORDS:
+             if gh_kw.lower() in item_name_lower:
+                 is_group_header = True
+                 break
+        if is_group_header: continue
+
         mdl_val_str = None
         if mdl_idx != -1 and mdl_idx < len(clean_row):
-             mdl_raw = clean_text(clean_row[mdl_idx])
-             m_match = re.search(r"([\d\.]+)", mdl_raw)
+             mdl_val_str = clean_text(clean_row[mdl_idx])
+             m_match = re.search(r"([\d\.]+)", mdl_val_str)
              if m_match: mdl_val_str = m_match.group(1)
 
         result_cell = ""
-        # 嚴格只看 Result 欄
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        # CTI 不進行 Fallback 搜尋
-        # 傳入 mdl_value 參數，讓核心邏輯進行比對
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ 
-    SGS 專用解析器 (保留 v39.0 的成功邏輯)：
-    1. 支援中文表頭
-    2. 支援 Fallback 猜測 (SGS 排版多變)
-    3. 不傳入 mdl_value (避免誤殺 SGS 的有效小數值)
-    """
+    """ SGS Logic """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -283,7 +277,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
 
     if item_idx == -1: item_idx = 0
     
-    # SGS Fallback
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -305,7 +298,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
         
         item_name = clean_row[item_idx]
-        # v42.0: 移除項目名稱中的三角形，方便匹配
         clean_item_name = item_name.replace("▼", "").replace("▲", "").strip()
 
         if "test item" in item_name.lower() or "result" in item_name.lower() or "limit" in item_name.lower() or "检测项目" in item_name: continue
@@ -314,7 +306,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         if result_idx != -1 and result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        # SGS Fallback: 允許行內搜尋
         if not result_cell:
             for i, cell in enumerate(clean_row):
                 if i in [limit_idx, mdl_idx, unit_idx]: continue
@@ -325,11 +316,9 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
                      if not is_suspicious_limit_value(cell):
                         result_cell = cell
 
-        # SGS: 不傳入 mdl_value，保持最高兼容性
         process_row_data(clean_item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ 通用解析器 (Intertek 等) """
     item_idx = -1; result_idx = -1
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -361,14 +350,13 @@ def parse_table_generic(table, filename, data_pool, file_group_data, global_trac
 
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
-# --- 4. 核心處理邏輯 ---
+# --- 4. Core Logic ---
 
 def process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table, mdl_value=None):
     current_key = None
     item_lower = item_name.lower()
     
     for k, v in SIMPLE_KEYWORDS.items():
-        # 鹵素排他性
         if k == "BR":
             if any(x in item_lower for x in ["poly", "biphenyl", "ether", "hbcdd", "tbbp", "联苯", "二苯醚", "环十二烷", "双酚"]): continue
         if k == "CL":
@@ -382,7 +370,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
         if current_key: break
 
-    # 傳入 mdl_value 進行 CTI 防呆
     priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False, mdl_value=mdl_value)
     if priority[0] == 0: return
 
@@ -423,7 +410,7 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 file_group_data[group_key].append(priority)
                 break
 
-# --- 5. 文字模式解析 ---
+# --- 5. Text Mode ---
 
 def parse_text_lines(text, data_pool, file_group_data, filename, found_elements, debug_logs):
     lines = text.split('\n')
@@ -487,7 +474,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
-# --- 主程式 ---
+# --- Main ---
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
@@ -590,9 +577,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- UI ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v42.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v42.0 完美分流版)")
-st.error("🛠️ v42.0：實施「邏輯分流」策略：SGS 報告沿用 v39.0 的完美邏輯 (支援中文、三角形豁免、Fallback)；CTI 報告使用 v41.0 的嚴格邏輯 (鎖定 Result 欄位、MDL 防呆)，互不干擾。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v40.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v40.0 PBB/PBDE 智能聚合版)")
+st.error("🛠️ v40.0：重大升級：針對 CTI 報告的 PBB/PBDE 採用「細項聚合」邏輯，直接跳過標題行，從細項中計算最大值。新增 MDL 自動防呆機制，若檢測結果數值等於 MDL，強制視為 N.D.，徹底解決誤抓 MDL 的問題。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

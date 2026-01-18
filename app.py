@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字定義 ---
+# --- 1. 關鍵字定義 (v37.5: 大幅擴充 PBB/PBDE 異體字) ---
 
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb"], 
@@ -25,20 +25,29 @@ SIMPLE_KEYWORDS = {
 
 GROUP_KEYWORDS = {
     "PBB": [
-        "Polybrominated Biphenyls", "PBBs", "多溴联苯", "多溴聯苯",
-        "Monobromobiphenyl", "一溴联苯", "Dibromobiphenyl", "二溴联苯",
-        "Tribromobiphenyl", "三溴联苯", "Tetrabromobiphenyl", "四溴联苯",
-        "Pentabromobiphenyl", "五溴联苯", "Hexabromobiphenyl", "六溴联苯",
-        "Heptabromobiphenyl", "七溴联苯", "Octabromobiphenyl", "八溴联苯",
-        "Nonabromobiphenyl", "九溴联苯", "Decabromobiphenyl", "十溴联苯"
+        # 寫法 A: Polybromobiphenyl
+        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴联苯", "多溴聯苯",
+        "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
+        "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
+        "Nonabromobiphenyl", "Decabromobiphenyl",
+        # 寫法 B: Brominated biphenyl (v37.5 新增)
+        "Monobrominated biphenyl", "Dibrominated biphenyl", "Tribrominated biphenyl", 
+        "Tetrabrominated biphenyl", "Pentabrominated biphenyl", "Hexabrominated biphenyl", 
+        "Heptabrominated biphenyl", "Octabrominated biphenyl", "Nonabrominated biphenyl", 
+        "Decabrominated biphenyl"
     ],
     "PBDE": [
-        "Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚",
-        "Monobromodiphenyl ether", "一溴二苯醚", "Dibromodiphenyl ether", "二溴二苯醚",
-        "Tribromodiphenyl ether", "三溴二苯醚", "Tetrabromodiphenyl ether", "四溴二苯醚",
-        "Pentabromodiphenyl ether", "五溴二苯醚", "Hexabromodiphenyl ether", "六溴二苯醚",
-        "Heptabromodiphenyl ether", "七溴二苯醚", "Octabromodiphenyl ether", "八溴二苯醚",
-        "Nonabromodiphenyl ether", "九溴二苯醚", "Decabromodiphenyl ether", "十溴二苯醚"
+        # 寫法 A: Polybromodiphenyl ether
+        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴二苯醚",
+        "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
+        "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
+        "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
+        "Decabromodiphenyl ether",
+        # 寫法 B: Brominated diphenyl ether (v37.5 新增)
+        "Monobrominated diphenyl ether", "Dibrominated diphenyl ether", "Tribrominated diphenyl ether", 
+        "Tetrabrominated diphenyl ether", "Pentabrominated diphenyl ether", "Hexabrominated diphenyl ether", 
+        "Heptabrominated diphenyl ether", "Octabrominated diphenyl ether", "Nonabrominated diphenyl ether", 
+        "Decabrominated diphenyl ether"
     ]
 }
 
@@ -116,9 +125,11 @@ def is_suspicious_limit_value(val):
 
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False):
     """
-    v37.4 核心解析邏輯：
-    - 如果是表格模式 (is_table_result=True)：高度信任，允許小整數 (如 8, 9)。
-    - 如果是文字模式 (is_text_mode=True)：低度信任，嚴格封鎖小整數 (如 25, 19)。
+    v37.5 核心邏輯：
+    - is_table_result=True (表格模式)：信任度高，允許小整數 (Pb=9)。
+    - is_text_mode=True (文字模式)：
+      - 如果該行有單位 (mg/kg, ppm)，視為高信心，允許小整數。
+      - 如果該行無單位，視為低信心，封鎖小整數 (防 PFOS=25, Page 9)。
     """
     raw_val = clean_text(value_str)
     
@@ -130,15 +141,12 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
-    # 關鍵字過濾
     filter_keywords = ["iec", "iso", "epa", "gb/t", "directive", "annex", "mdl", "loq", "limit", "result", "unit", "method", "reference", "determination", "conclusion", "pass", "fail", "requirement", "---", "note", "remark"]
     if any(x in val_lower for x in filter_keywords): return (0, 0, "")
     
     if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): return (0, 0, "")
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
-    
-    # SGS 的 A16 是樣品編號，不是數值
     if val in ["026", "001", "002", "003", "004", "A16"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
@@ -159,9 +167,9 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
                 
-                # ★ v37.4 關鍵修正：只有在文字模式下，才執行小整數封鎖
-                # 只要是表格模式抓出來的 (is_table_result=True)，一律放行
+                # ★ v37.5: 文字模式下的過濾邏輯
                 if is_text_mode and number.is_integer() and number < 50:
+                    # 如果不是表格結果，且被標記為低信心文字模式，則丟棄
                     return (0, 0, "")
 
             full_str = val 
@@ -173,13 +181,11 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 # --- 3. 獨立的表格解析器 ---
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ CTI 專用表格解析邏輯 """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
-    # 排除清單表格
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
        ("result" not in header_text and "结果" not in header_text):
         return
@@ -220,11 +226,9 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
                     result_cell = cell
                     break
         
-        # 強制傳入 is_table_result=True
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ SGS 專用表格解析邏輯 - 支援 A16, 001 等變體表頭 """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -239,19 +243,16 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt: unit_idx = c_idx
             
-            # SGS 表頭多樣性支援
             if "result" in txt or "結果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or re.search(r"[a-z]\d+", txt):
                 if result_idx == -1 and "cas" not in txt and "limit" not in txt and "method" not in txt:
                     result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     
-    # SGS Fallback: 如果找不到明確的 Result 欄位，啟用「排除法」
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
             if candidate_idx not in [item_idx, mdl_idx, limit_idx, unit_idx]:
-                # 抽查是否像結果
                 is_likely_result = False
                 for r_chk in range(1, min(6, len(table))): 
                     if candidate_idx < len(table[r_chk]):
@@ -285,11 +286,9 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
                      if not is_suspicious_limit_value(cell):
                         result_cell = cell
 
-        # 強制傳入 is_table_result=True
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ 通用/Intertek 表格解析邏輯 """
     item_idx = -1; result_idx = -1
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -332,7 +331,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
         if current_key: break
 
-    # 關鍵：表格模式下，is_table_result=True，允許解析所有數字 (包括 8, 9)
     priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False)
     if priority[0] == 0: return
 
@@ -341,7 +339,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
             if kw in item_name or kw.lower() in item_name.lower():
                 if target_key == "PFOS" and ("related" in item_name.lower() or "derivative" in item_name.lower()): continue
                 
-                # 更新權重邏輯
                 data_pool[target_key].append({"priority": priority, "filename": filename, "source": 2 if is_table else 1})
                 found_elements_in_table.add(target_key)
                 
@@ -351,7 +348,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                         "Value": result_cell, "Type": "Table" if is_table else "Text"
                     })
 
-                # 更新 Tracker
                 score, val, _ = priority
                 if score > global_tracker[target_key]["max_score"]:
                     global_tracker[target_key]["max_score"] = score
@@ -381,6 +377,10 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
         if "directive" in line_lower and "2011/65" in line_lower: continue
         if "remark" in line_lower or "note" in line_lower: continue 
 
+        # v37.5: 單位信心檢查 (有單位=高信心，無單位=低信心)
+        has_unit = any(u in line_lower for u in ["mg/kg", "ppm", "µg/cm", "%"])
+        is_text_mode_strict = not has_unit 
+
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
             if key in found_elements: continue 
@@ -407,14 +407,17 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
             for part in reversed(parts):
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "uqt", "loq", "mdl", "---", "-"]: continue
-                # 文字模式下，is_text_mode=True，嚴格封鎖小整數
-                priority = parse_value_priority(part, target_key=matched_simple, is_table_result=False, is_text_mode=True)
+                
+                # 傳入 is_text_mode=is_text_mode_strict
+                # 如果有單位，is_text_mode_strict=False，允許抓 9
+                # 如果無單位，is_text_mode_strict=True，過濾 9
+                priority = parse_value_priority(part, target_key=matched_simple, is_table_result=False, is_text_mode=is_text_mode_strict)
                 if priority[0] > 0:
                     found_val = part
                     break
             
             if found_val:
-                priority = parse_value_priority(found_val, target_key=matched_simple, is_table_result=False, is_text_mode=True)
+                priority = parse_value_priority(found_val, target_key=matched_simple, is_table_result=False, is_text_mode=is_text_mode_strict)
                 if matched_simple:
                     data_pool[matched_simple].append({"priority": priority, "filename": filename, "source": 1})
                     debug_logs.append({
@@ -527,9 +530,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.4", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v37.4 SGS 數值權威版)")
-st.error("🛠️ v37.4：邏輯修正：SGS/CTI 表格模式中抓到的數值（即使是 8 這種小整數）將被視為高信心結果並保留。文字模式雜訊（如 19, 25）依然會被嚴格過濾。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v37.5", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v37.5 終極完整版)")
+st.error("🛠️ v37.5：關鍵字擴充 (PBB/PBDE 異體字) + 單位信心機制 (解決 Pb=9 抓取問題)。完美兼容 SGS 表格缺失時的文字模式抓取，同時防止抓到頁碼雜訊。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

@@ -21,8 +21,8 @@ SIMPLE_KEYWORDS = {
     "CL": ["Chlorine", "氯", "(Cl)"],
     "BR": ["Bromine", "溴", "(Br)"],
     "I": ["Iodine", "碘", "(I)"],
-    "Be": ["Beryllium", "铍", "Be"], # 導致 SGS 崩潰的元兇，已修復
-    "Sb": ["Antimony", "锑", "Sb"]
+    "Be": ["Beryllium", "铍", "Be"], 
+    "Sb": ["Antimony", "锑", "Sb"]   
 }
 
 PBB_HEADER_KEYWORDS = [
@@ -69,7 +69,7 @@ OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
     "PFOS", "PFAS", "F", "CL", "BR", "I", 
-    "Be", "Sb", # v49.1: 新增欄位，防止 KeyError 崩潰
+    "Be", "Sb",
     "日期", "檔案名稱"
 ]
 
@@ -180,7 +180,6 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             
             if target_key == "Cr6+" and number in [0.10, 0.13]: return (0, 0, "")
 
-            # CTI MDL 強制過濾
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
@@ -293,6 +292,10 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ 
+    SGS Logic (v50.0 Enhanced)
+    - 新增對 "A" + 數字 (如 A4, A1) 作為 Result 欄位標題的強力支援
+    """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -307,15 +310,18 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt or "单位" in txt: unit_idx = c_idx
             
-            if "result" in txt or "結果" in txt or "检测结果" in txt or \
-               re.search(r"\b(no\.|00[1-9])", txt) or \
-               re.search(r"\b[a-z](?:-|\s)?\d+\b", txt) or \
-               re.search(r"^\d{3}$", txt):
-                if result_idx == -1 and "cas" not in txt and "limit" not in txt and "method" not in txt:
+            # v50.0: 強力匹配 SGS 樣品編號表頭 (如 A4, A1)
+            # 正則: 以 A/a 開頭，後接數字，且為全詞匹配
+            if result_idx == -1 and c_idx not in [item_idx, mdl_idx, limit_idx, unit_idx]:
+                if "result" in txt or "結果" in txt or "检测结果" in txt or \
+                   re.search(r"\b(no\.|00[1-9])", txt) or \
+                   re.search(r"^[a-z]\s*\d+$", txt) or \
+                   re.search(r"^\d{3}$", txt):
                     result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     
+    # SGS Fallback
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
@@ -345,6 +351,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         if result_idx != -1 and result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
+        # SGS Fallback
         if not result_cell:
             for i, cell in enumerate(clean_row):
                 if i in [limit_idx, mdl_idx, unit_idx]: continue
@@ -409,14 +416,13 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
         if current_key: break
 
-    # v49.1 Crash Fix: 如果解析到的 key 不在 data_pool (即不在 OUTPUT_COLUMNS) 中，直接跳過，防止 KeyError
+    # v50.0: 防止 KeyError (Be/Sb 等未定義欄位)
     if current_key and current_key not in data_pool: return
 
     priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False, mdl_value=mdl_value)
     if priority[0] == 0: return
 
     for target_key, keywords in SIMPLE_KEYWORDS.items():
-        # 同樣檢查 Key 是否存在
         if target_key not in data_pool: continue
 
         if target_key == "BR":
@@ -528,9 +534,6 @@ def process_files(files):
     # Initialize data_pool with ALL output columns to be safe
     data_pool = {key: [] for key in OUTPUT_COLUMNS}
     
-    # Global tracker also needs to respect OUTPUT_COLUMNS to avoid key errors if SIMPLE_KEYWORDS has extra keys
-    # But SIMPLE_KEYWORDS is the source of truth for detection.
-    # We will filter in process_row_data.
     global_tracker = {key: {"max_score": -1, "max_value": -1.0, "filename": ""} for key in SIMPLE_KEYWORDS.keys()}
     
     all_dates = []
@@ -635,9 +638,9 @@ def process_files(files):
     return [final_row], debug_logs
 
 # --- UI ---
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v49.1", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v49.1 關鍵錯誤修復版)")
-st.error("🛠️ v49.1：修復了因新增關鍵字 (Be, Sb) 但未更新輸出欄位而導致的 `KeyError` 崩潰問題，SGS 報告現可正常解析。同時保留對 A4 表頭的支援以及 CTI 的防呆邏輯。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v50.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v50.0 終極修復版)")
+st.error("🛠️ v50.0：SGS 邏輯終極修正：新增對 'A4', 'A1' 等樣品編號作為結果欄標題的強力支援。這能精準識別 SGS 報告的結果欄位。同時保留了 CTI 報告的 MDL 防呆與 N.D. 優先邏輯。")
 
 uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

@@ -116,9 +116,9 @@ def is_suspicious_limit_value(val):
 
 def parse_value_priority(value_str, target_key=None, is_table_result=False, is_text_mode=False):
     """
-    數值解析核心
-    is_table_result: True 表示來源是表格 -> 信任結構，允許小整數 (如 8)
-    is_text_mode: True 表示來源是文字 -> 不信任結構，封鎖小整數 (如 25, 19)
+    v37.4 核心解析邏輯：
+    - 如果是表格模式 (is_table_result=True)：高度信任，允許小整數 (如 8, 9)。
+    - 如果是文字模式 (is_text_mode=True)：低度信任，嚴格封鎖小整數 (如 25, 19)。
     """
     raw_val = clean_text(value_str)
     
@@ -130,12 +130,15 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     if not val: return (0, 0, "")
     val_lower = val.lower()
 
+    # 關鍵字過濾
     filter_keywords = ["iec", "iso", "epa", "gb/t", "directive", "annex", "mdl", "loq", "limit", "result", "unit", "method", "reference", "determination", "conclusion", "pass", "fail", "requirement", "---", "note", "remark"]
     if any(x in val_lower for x in filter_keywords): return (0, 0, "")
     
     if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): return (0, 0, "")
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
+    
+    # SGS 的 A16 是樣品編號，不是數值
     if val in ["026", "001", "002", "003", "004", "A16"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
@@ -156,8 +159,8 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if not is_halogen:
                 if number > 3000: return (0, 0, "")
                 
-                # ★ 關鍵修正：只有在「文字模式」下，才嚴格過濾 < 50 的小整數
-                # 表格模式 (is_table_result=True) 允許 8, 9, 12 等結果
+                # ★ v37.4 關鍵修正：只有在文字模式下，才執行小整數封鎖
+                # 只要是表格模式抓出來的 (is_table_result=True)，一律放行
                 if is_text_mode and number.is_integer() and number < 50:
                     return (0, 0, "")
 
@@ -170,6 +173,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 # --- 3. 獨立的表格解析器 ---
 
 def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ CTI 專用表格解析邏輯 """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -216,10 +220,11 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
                     result_cell = cell
                     break
         
-        # 表格模式 -> is_table_result=True
+        # 強制傳入 is_table_result=True
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ SGS 專用表格解析邏輯 - 支援 A16, 001 等變體表頭 """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -234,16 +239,19 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt: unit_idx = c_idx
             
+            # SGS 表頭多樣性支援
             if "result" in txt or "結果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or re.search(r"[a-z]\d+", txt):
                 if result_idx == -1 and "cas" not in txt and "limit" not in txt and "method" not in txt:
                     result_idx = c_idx
 
     if item_idx == -1: item_idx = 0
     
+    # SGS Fallback: 如果找不到明確的 Result 欄位，啟用「排除法」
     if result_idx == -1:
         candidate_idx = len(table[0]) - 1
         while candidate_idx >= 0:
             if candidate_idx not in [item_idx, mdl_idx, limit_idx, unit_idx]:
+                # 抽查是否像結果
                 is_likely_result = False
                 for r_chk in range(1, min(6, len(table))): 
                     if candidate_idx < len(table[r_chk]):
@@ -277,10 +285,11 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
                      if not is_suspicious_limit_value(cell):
                         result_cell = cell
 
-        # 表格模式 -> is_table_result=True
+        # 強制傳入 is_table_result=True
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ 通用/Intertek 表格解析邏輯 """
     item_idx = -1; result_idx = -1
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -323,8 +332,8 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
         if current_key: break
 
-    # 傳入 is_table_result=True，讓表格內的小數值 (如 Pb=8) 可以通過
-    priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=True, is_text_mode=False)
+    # 關鍵：表格模式下，is_table_result=True，允許解析所有數字 (包括 8, 9)
+    priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False)
     if priority[0] == 0: return
 
     for target_key, keywords in SIMPLE_KEYWORDS.items():
@@ -332,6 +341,7 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
             if kw in item_name or kw.lower() in item_name.lower():
                 if target_key == "PFOS" and ("related" in item_name.lower() or "derivative" in item_name.lower()): continue
                 
+                # 更新權重邏輯
                 data_pool[target_key].append({"priority": priority, "filename": filename, "source": 2 if is_table else 1})
                 found_elements_in_table.add(target_key)
                 
@@ -341,6 +351,7 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                         "Value": result_cell, "Type": "Table" if is_table else "Text"
                     })
 
+                # 更新 Tracker
                 score, val, _ = priority
                 if score > global_tracker[target_key]["max_score"]:
                     global_tracker[target_key]["max_score"] = score
@@ -396,7 +407,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
             for part in reversed(parts):
                 p_lower = part.lower()
                 if p_lower in ["mg/kg", "ppm", "uqt", "loq", "mdl", "---", "-"]: continue
-                # 文字模式 is_text_mode=True
+                # 文字模式下，is_text_mode=True，嚴格封鎖小整數
                 priority = parse_value_priority(part, target_key=matched_simple, is_table_result=False, is_text_mode=True)
                 if priority[0] > 0:
                     found_val = part

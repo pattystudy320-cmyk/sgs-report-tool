@@ -7,7 +7,6 @@ from datetime import datetime
 
 # --- 1. 關鍵字定義 ---
 
-# 移除 Be, Sb 以符合您的 RoHS 需求
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
     "Cd": ["Cadmium", "镉", "Cd", "카드뮴"], 
@@ -292,7 +291,6 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, sample_id=None):
-    """ SGS Logic """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -402,7 +400,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
         if current_key: break
 
-    # Check key existence
     if current_key and current_key not in data_pool: return
 
     priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False, mdl_value=mdl_value)
@@ -514,7 +511,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
-# --- 6. Scanned PDF Detection ---
+# --- 6. Scanned PDF Detection (v54.2 Fixed) ---
 
 def detect_scanned_pdfs(uploaded_files):
     scanned_files = []
@@ -541,19 +538,143 @@ def detect_scanned_pdfs(uploaded_files):
     progress_text.empty()
     return scanned_files
 
+# --- 7. Main Engine (Re-added in v54.2) ---
+
+def process_files(files):
+    # Initialize data_pool with ALL output columns to be safe
+    data_pool = {key: [] for key in OUTPUT_COLUMNS}
+    
+    global_tracker = {key: {"max_score": -1, "max_value": -1.0, "filename": ""} for key in SIMPLE_KEYWORDS.keys()}
+    
+    all_dates = []
+    debug_logs = []
+    progress_bar = st.progress(0)
+    
+    for i, file in enumerate(files):
+        filename = file.name
+        file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
+        found_elements_in_table = set()
+        
+        try:
+            with pdfplumber.open(file) as pdf:
+                # --- v54.0: 空白頁面檢測 (圖片PDF防呆) ---
+                text_content_check = ""
+                for p in pdf.pages:
+                    text_content_check += (p.extract_text() or "")
+                
+                # 若為掃描檔，跳過此檔案，但不中斷迴圈 (continue)
+                if len(text_content_check.strip()) < 50:
+                    continue
+                # ----------------------------------------
+
+                file_dates = []
+                full_text_content = "" 
+                extracted_sample_id = None
+
+                for p_idx, page in enumerate(pdf.pages):
+                    page_txt = page.extract_text() or ""
+                    full_text_content += page_txt + "\n"
+                    if p_idx < 3: 
+                        d = extract_date_from_text(page_txt)
+                        if d: file_dates.append(d)
+                        # v53.0: 提取樣品編號 (Sample No.)
+                        sid_match = re.search(r"Sample\s*No\.?\s*[:\.]?\s*([A-Za-z0-9]+)", page_txt, re.IGNORECASE)
+                        if sid_match:
+                            extracted_sample_id = sid_match.group(1).strip()
+                
+                if file_dates: all_dates.append((max(file_dates), filename))
+                company = identify_company(full_text_content[:2000])
+                
+                if check_pfas_in_summary(full_text_content[:2000]):
+                    data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename, "source": 2})
+                    debug_logs.append({"File": filename, "Element": "PFAS", "Value": "REPORT", "Type": "Summary"})
+
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if not table or len(table) < 2: continue
+                        
+                        if company == "CTI":
+                            parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
+                        elif company == "SGS":
+                            parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, sample_id=extracted_sample_id)
+                        elif company == "URHONGXIN":
+                            parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
+                        else:
+                            parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
+                
+                if company != "CTI":
+                    parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table, debug_logs)
+                
+                for k in SIMPLE_KEYWORDS.keys():
+                    if k not in data_pool: continue 
+                    for d in data_pool[k]:
+                         p = d['priority']
+                         if p[0] > global_tracker[k]["max_score"]:
+                             global_tracker[k]["max_score"] = p[0]
+                             global_tracker[k]["max_value"] = p[1]
+                             global_tracker[k]["filename"] = filename
+                         elif p[0] == global_tracker[k]["max_score"] and p[1] > global_tracker[k]["max_value"]:
+                             global_tracker[k]["max_value"] = p[1]
+                             global_tracker[k]["filename"] = filename
+
+            for group_key, values in file_group_data.items():
+                if values:
+                    best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                    if group_key in data_pool:
+                        data_pool[group_key].append({
+                            "priority": best_in_file,
+                            "filename": filename,
+                            "source": 2 
+                        })
+
+        except Exception as e:
+            st.warning(f"⚠️ 檔案 {filename} 解析異常: {e}")
+        
+        progress_bar.progress((i + 1) / len(files))
+
+    final_row = {}
+    for key in OUTPUT_COLUMNS:
+        if key in ["日期", "檔案名稱"]: continue
+        candidates = data_pool.get(key, [])
+        if not candidates:
+            final_row[key] = "" 
+            continue
+        
+        best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1], x.get('source', 0)), reverse=True)[0]
+        final_row[key] = best_record['priority'][2]
+
+    final_date_str = ""
+    if all_dates:
+        latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
+        final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
+    
+    final_file = ""
+    if global_tracker["Pb"]["filename"]:
+        final_file = global_tracker["Pb"]["filename"]
+    elif global_tracker["Cd"]["filename"]:
+        final_file = global_tracker["Cd"]["filename"]
+    else:
+        final_file = latest_date_record[1] if all_dates else (files[0].name if files else "Unknown")
+        
+    final_row["日期"] = final_date_str
+    final_row["檔案名稱"] = final_file
+
+    return [final_row], debug_logs
+
 # --- Main ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI 報告聚合工具 v54.1", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v54.1 完整修復版)")
-    st.error("🛠️ v54.1：此版本包含所有修復：1. 圖片檔偵測 (解決空白問題)。2. SGS A4 表頭支援。3. CTI MDL 防呆。4. 程式碼結構完整 (不再有 NameError)。")
+    st.set_page_config(page_title="SGS/CTI 報告聚合工具 v54.2", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v54.2 真正修復版)")
+    st.error("🛠️ v54.2：包含完整的處理引擎，修復了 NameError。現在即使有圖片檔混入，程式也會先報警，然後**繼續處理其他正常的檔案**。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 
     if uploaded_files:
         if st.button("🔄 開始分析"):
             
-            # 1. Scanned PDF Detection
+            # 1. Scanned PDF Detection (圖片檔偵測)
             bad_files = detect_scanned_pdfs(uploaded_files)
             
             if bad_files:
@@ -564,7 +685,7 @@ if __name__ == "__main__":
                     st.write(f"- 📄 `{bf}`")
                 st.markdown("---")
 
-            # 2. Main Processing
+            # 2. Main Processing (核心處理流程)
             try:
                 result_data, debug_logs = process_files(uploaded_files)
                 df = pd.DataFrame(result_data)

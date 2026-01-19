@@ -7,6 +7,7 @@ from datetime import datetime
 
 # --- 1. 關鍵字定義 ---
 
+# 移除 Be, Sb 以符合您的 RoHS 需求
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
     "Cd": ["Cadmium", "镉", "Cd", "카드뮴"], 
@@ -20,9 +21,7 @@ SIMPLE_KEYWORDS = {
     "F": ["Fluorine", "氟", "(F)"],
     "CL": ["Chlorine", "氯", "(Cl)"],
     "BR": ["Bromine", "溴", "(Br)"],
-    "I": ["Iodine", "碘", "(I)"],
-    "Be": ["Beryllium", "铍", "Be"], 
-    "Sb": ["Antimony", "锑", "Sb"]   
+    "I": ["Iodine", "碘", "(I)"]
 }
 
 PBB_HEADER_KEYWORDS = [
@@ -69,7 +68,6 @@ OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
     "PFOS", "PFAS", "F", "CL", "BR", "I", 
-    "Be", "Sb",
     "日期", "檔案名稱"
 ]
 
@@ -181,7 +179,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             
             if target_key == "Cr6+" and number in [0.10, 0.13]: return (0, 0, "")
 
-            # CTI MDL 防呆
+            # CTI MDL Protection
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
@@ -294,9 +292,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, sample_id=None):
-    """ 
-    SGS Logic (v53.0)
-    """
+    """ SGS Logic """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -341,6 +337,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         if result_idx != -1 and result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
+        # SGS Fallback (In-row scan)
         if not result_cell:
             for i, cell in enumerate(clean_row):
                 if i in [limit_idx, mdl_idx, unit_idx]: continue
@@ -405,6 +402,7 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                 break
         if current_key: break
 
+    # Check key existence
     if current_key and current_key not in data_pool: return
 
     priority = parse_value_priority(result_cell, target_key=current_key, is_table_result=is_table, is_text_mode=False, mdl_value=mdl_value)
@@ -516,35 +514,28 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
-# --- 6. Scanned PDF Detection (v54.0) ---
+# --- 6. Scanned PDF Detection ---
 
 def detect_scanned_pdfs(uploaded_files):
     scanned_files = []
-    
     progress_text = st.empty()
     
     for file in uploaded_files:
         filename = file.name
         progress_text.text(f"正在檢查檔案格式: {filename}...")
-        
         try:
             file.seek(0)
-            
             with pdfplumber.open(file) as pdf:
                 total_text_length = 0
                 check_pages = pdf.pages[:3] 
-                
                 for page in check_pages:
                     text = page.extract_text()
                     if text:
                         total_text_length += len(text.strip())
-                
                 if total_text_length < 50:
                     scanned_files.append(filename)
-                    
         except Exception as e:
             st.error(f"檔案 {filename} 無法開啟: {e}")
-            
         file.seek(0)
 
     progress_text.empty()
@@ -553,9 +544,9 @@ def detect_scanned_pdfs(uploaded_files):
 # --- Main ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI 報告聚合工具 v54.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v54.0 圖片防呆完整版)")
-    st.error("🛠️ v54.0：整合所有修復：1. **圖片檔偵測**：自動識別無法複製文字的掃描檔。2. **SGS**：完整支援 'A4'/'Sample No' 表頭。3. **CTI**：具備 MDL 強制過濾與 N.D. 優先掃描功能。4. **防崩潰**：包含 Be/Sb 的安全機制。")
+    st.set_page_config(page_title="SGS/CTI 報告聚合工具 v54.1", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v54.1 完整修復版)")
+    st.error("🛠️ v54.1：此版本包含所有修復：1. 圖片檔偵測 (解決空白問題)。2. SGS A4 表頭支援。3. CTI MDL 防呆。4. 程式碼結構完整 (不再有 NameError)。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

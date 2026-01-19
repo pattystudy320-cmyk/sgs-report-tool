@@ -183,7 +183,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
-            # v60.0 Intertek Protection: 1000/100 Filter
+            # v60.0 Intertek Protection: 強制過濾 1000/100 Limit
             if mdl_value == "INTERTEK_MODE":
                  if number in [1000.0, 100.0]: return (0, 0, "")
 
@@ -212,16 +212,15 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 def parse_table_intertek(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
     Intertek Dedicated Parser (v60.0)
-    1. 封殺 Limit 表格
-    2. ***幾何夾擊法 (Geometric Pincer)***: 
-       使用 Unit 和 MDL/RL 作為邊界，Result 必在其中。
-       這能解決 Result 標題千變萬化 (如 Result Green material) 的問題。
+    1. 封殺純 Limit 表格 (Restricted Substances + Limits) -> 解決 1000 誤抓
+    2. 幾何夾擊法: 用 MDL 定位 Result 欄位，並鎖定該欄位索引
     """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
+    # 1. 封殺純 Limit 表格
     if "restricted substances" in header_text and "limits" in header_text:
         return
 
@@ -239,21 +238,19 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt or "單位" in txt: unit_idx = c_idx
 
-    # --- v60.0 核心：幾何夾擊定位 ---
-    # 如果我們有 Unit 和 MDL，Result 就在它們中間
+    # 2. 幾何夾擊定位 Result 欄位
     if result_idx == -1:
         if unit_idx != -1 and mdl_idx != -1 and mdl_idx > unit_idx:
-            # 假設 Unit 在左，MDL 在右，Result 在 Unit 和 MDL 之間
-            # 通常在 MDL 左邊一格
+            # 位於 Unit 和 MDL 之間
             result_idx = mdl_idx - 1
         elif mdl_idx != -1 and mdl_idx > 0:
             # 只有 MDL，Result 就在 MDL 左邊
             result_idx = mdl_idx - 1
-    # -----------------------------
     
     if item_idx == -1: item_idx = 0
     if result_idx == -1: return
 
+    # 3. 欄位鎖定讀取
     for row in table:
         clean_row = [clean_text(cell) for cell in row]
         if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
@@ -261,24 +258,25 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
         item_name = clean_row[item_idx]
         item_lower = item_name.lower()
         
+        # PFAS 總結行
         if "all pfas substances" in item_lower:
             pfas_res = ""
             if result_idx < len(clean_row) and clean_row[result_idx]:
                 pfas_res = clean_row[result_idx]
             elif clean_row[-1]:
                 pfas_res = clean_row[-1]
-            
             if pfas_res:
                 process_row_data("PFAS", pfas_res, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
             continue
             
         if "test item" in item_lower: continue
 
+        # 鎖定讀取 Result 欄，不讀其他欄位
         result_cell = ""
-        # 嚴格只讀取 result_idx
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
+        # 獲取 MDL 值供防呆
         mdl_val = None
         if mdl_idx != -1 and mdl_idx < len(clean_row):
              mdl_val = clean_row[mdl_idx]
@@ -756,7 +754,7 @@ def process_files(files):
 if __name__ == "__main__":
     st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v60.0", layout="wide")
     st.title("📄 萬用型檢測報告聚合工具 (v60.0 Intertek 幾何鎖定版)")
-    st.error("🛠️ v60.0：引入「物理欄位夾擊法 (Geometric Pincer)」：利用 Unit 與 MDL/RL 欄位的位置，強制鎖定夾在中間的 Result 欄位。這能無視任何標題排版變異 (如 Result Green material)，精準抓取 PBB/PBDE 的 N.D. 值。")
+    st.error("🛠️ v60.0：引入「物理欄位夾擊法 (Geometric Pincer)」：利用 Unit 與 MDL/RL 欄位的位置，強制鎖定夾在中間的 Result 欄位。這能無視任何標題排版變異 (如 Result Green material)，精準抓取 PBB/PBDE 的 N.D. 值。同時徹底封殺 Limit 表格。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

@@ -183,9 +183,9 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
-            # v61.0 Intertek Protection: 強制過濾 1000/100/5 Limit
+            # v62.0 Intertek Protection: 強制過濾 1000/100/5/2 Limit/MDL
             if mdl_value == "INTERTEK_MODE":
-                 if number in [1000.0, 100.0, 5.0, 2.0]: return (0, 0, "")
+                 if number in [1000.0, 100.0, 50.0, 5.0, 2.0]: return (0, 0, "")
 
             if mdl_value and "MODE" not in str(mdl_value):
                 try:
@@ -211,16 +211,16 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 
 def parse_table_intertek(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
-    Intertek Dedicated Parser (v61.0)
-    1. 只封殺標題含 "Restricted Substances" 的表 (Limit 表)。
-    2. PBB/PBDE: 掃描整行，如果發現 "ND"，直接抓取，完全無視 Limit/MDL 欄位。
+    Intertek Dedicated Parser (v62.0 - Global Row Scanning)
+    1. 封殺 Limit 表格。
+    2. 對於 PBB/PBDE，放棄欄位索引，改用「全行掃描」+「數值過濾」。
     """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
-    # 1. 精準封殺 Limit 表 (避免誤殺 Result 表)
+    # 1. 封殺純 Limit 表
     if "restricted substances" in header_text and "limits" in header_text:
         return
 
@@ -238,15 +238,11 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt or "單位" in txt: unit_idx = c_idx
 
-    # 2. 欄位定位修正
+    # 校正：標準欄位定位 (對非 PBB/PBDE 的項目仍有用)
     if result_idx == -1 and mdl_idx != -1 and mdl_idx > 0:
         result_idx = mdl_idx - 1
     
     if item_idx == -1: item_idx = 0
-    if result_idx == -1: 
-        # 如果真的完全找不到 Result，啟用盲抓：倒數第二欄
-        cols = len(table[0])
-        if cols >= 3: result_idx = cols - 2
 
     for row in table:
         clean_row = [clean_text(cell) for cell in row]
@@ -268,29 +264,43 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
             
         if "test item" in item_lower: continue
 
-        # --- v61.0 核心邏輯：ND 優先權 (ND King) ---
-        # 針對 Intertek，不管欄位怎麼定位，只要這行有 ND，它就是結果！
-        # 這是最簡單也最有效的邏輯，因為 Limit/MDL 欄位絕對不會寫 "ND"
+        # --- v62.0 核心：行內掃描 (Row Scanning) ---
+        # 針對 PBB/PBDE，無視欄位索引，直接在整行裡找答案
+        is_pbb_pbde_item = "monobrominated" in item_lower or "dibrominated" in item_lower or "tribrominated" in item_lower
+        
         final_result = ""
-        found_nd = False
         
-        for cell in clean_row:
-            if "nd" in cell.lower() or "n.d." in cell.lower():
-                final_result = "N.D."
-                found_nd = True
-                break
-        
-        # 如果沒找到 ND，才去依賴欄位定位
-        if not found_nd:
-            if result_idx < len(clean_row):
+        if is_pbb_pbde_item:
+            # 策略 A: 找 ND
+            for cell in clean_row:
+                if "nd" in cell.lower() or "n.d." in cell.lower():
+                    final_result = "N.D."
+                    break
+            
+            # 策略 B: 如果沒 ND，找合法數字 (排除 1000, 100, 5)
+            if not final_result:
+                for cell in clean_row:
+                    # 跳過單位和方法描述
+                    if "mg/kg" in cell or "ppm" in cell or "iec" in cell.lower(): continue
+                    
+                    try:
+                        num = float(cell)
+                        # 黑名單過濾：Limit, MDL
+                        if num not in [1000.0, 100.0, 50.0, 5.0, 2.0]:
+                            final_result = cell
+                            break
+                    except: pass
+        else:
+            # 對於其他項目 (Pb, Cd 等)，使用標準欄位定位
+            if result_idx != -1 and result_idx < len(clean_row):
                 final_result = clean_row[result_idx]
+            # 防呆：如果抓到的跟 Limit 一樣，丟棄
+            if limit_idx != -1 and limit_idx < len(clean_row):
+                 if final_result == clean_row[limit_idx] and "nd" not in final_result.lower():
+                     final_result = ""
 
-        # 獲取 MDL 值供防呆
-        mdl_val = None
-        if mdl_idx != -1 and mdl_idx < len(clean_row):
-             mdl_val = clean_row[mdl_idx]
-
-        process_row_data(item_name, final_result, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val or "INTERTEK_MODE")
+        # 傳遞 INTERTEK_MODE 觸發最後一道數值過濾
+        process_row_data(item_name, final_result, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value="INTERTEK_MODE")
 
 def parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     item_idx = -1; result_idx = -1
@@ -539,7 +549,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
 def parse_text_lines(text, data_pool, file_group_data, filename, found_elements, debug_logs):
     lines = text.split('\n')
     
-    # v58.0: 報告章節偵測 (PFAS)
     pfas_found_in_text = False
     
     for line in lines:
@@ -547,7 +556,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
         if not line_clean: continue
         line_lower = line_clean.lower()
         
-        # PFAS 章節偵測
         if "2. per- and polyfluoroalkyl substances" in line_lower:
              pfas_found_in_text = True
 
@@ -763,9 +771,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v61.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v61.0 Intertek ND 優先版)")
-    st.error("🛠️ v61.0：邏輯重構：針對 Intertek，無論欄位如何錯位，只要程式在該行掃描到 'ND' 或 'N.D.'，絕對優先抓取！同時強制過濾 1000/100/5 等數值，杜絕誤抓 Limit 或 MDL 的可能性。")
+    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v62.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v62.0 Intertek 行內掃描版)")
+    st.error("🛠️ v62.0：針對 Intertek 表格錯位與 Limit 誤判的終極修正。放棄不可靠的欄位索引，改用「行內全掃描 + 數值黑名單」策略。只要該行是 PBB/PBDE，且出現 ND，即抓取；若出現數字，強制過濾 1000/100/5/2。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

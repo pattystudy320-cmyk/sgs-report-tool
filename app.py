@@ -21,7 +21,6 @@ SIMPLE_KEYWORDS = {
     "CL": ["Chlorine", "氯", "(Cl)"],
     "BR": ["Bromine", "溴", "(Br)"],
     "I": ["Iodine", "碘", "(I)"]
-    # 移除了 Be, Sb
 }
 
 PBB_HEADER_KEYWORDS = [
@@ -60,16 +59,15 @@ GROUP_KEYWORDS = {
     ]
 }
 
-# 擴充 PFAS 偵測關鍵字 (針對 Intertek)
 PFAS_SUMMARY_KEYWORDS = [
-    "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物质", "全氟烷基物质",
-    "Per- and Polyfluoroalkyl Substances (PFAS)"
+    "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物质", "全氟烷基物质"
 ]
 
 OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
     "PFOS", "PFAS", "F", "CL", "BR", "I", 
+    "Be", "Sb",
     "日期", "檔案名稱"
 ]
 
@@ -208,8 +206,13 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 # --- 3. Table Parsers ---
 
 def parse_table_intertek(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
-    """ Intertek Dedicated Parser (v56.0) """
-    item_idx = -1; result_idx = -1; mdl_idx = -1
+    """ 
+    Intertek Dedicated Parser (v57.0)
+    1. 明確識別 Result, MDL, Limit 欄位
+    2. 強制禁止讀取 Limit/MDL 欄位，防止誤抓 1000, 5
+    3. 支援 'All PFAS Substances' 總結行
+    """
+    item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1
     
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
@@ -221,13 +224,10 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
             if "result" in txt or "結果" in txt: 
                 if result_idx == -1: result_idx = c_idx
             if "mdl" in txt or "rl" in txt or "reporting limit" in txt: mdl_idx = c_idx
+            if "limit" in txt or "限值" in txt: limit_idx = c_idx
 
-    # v56.0 修復：如果 Result 的右邊還有 MDL/RL，確保我們不抓右邊的
-    if result_idx != -1 and mdl_idx != -1 and mdl_idx > result_idx:
-        # 這是正常情況，確保抓取 result_idx
-        pass
-    elif result_idx == -1 and mdl_idx != -1 and mdl_idx > 0:
-        # 如果沒找到 Result 標題，但有 MDL，通常 Result 在 MDL 左邊
+    # 校正：Intertek 結果欄通常在 MDL/Limit 的左邊
+    if result_idx == -1 and mdl_idx != -1 and mdl_idx > 0:
         result_idx = mdl_idx - 1
     
     if item_idx == -1: item_idx = 0
@@ -240,10 +240,9 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
         item_name = clean_row[item_idx]
         item_lower = item_name.lower()
         
-        # v56.0: 針對 Intertek PFAS 總結表格的特殊處理
-        # 尋找 "All PFAS Substances..." 這類字眼
+        # --- v57.0 Fix: PFAS 總結行抓取 ---
         if "all pfas substances" in item_lower:
-            # PFAS 結果可能在 Result 欄，也可能因為合併儲存格而在最後
+            # PFAS 結果通常在 Result 欄，或者如果合併儲存格，可能在最後一欄
             pfas_res = ""
             if result_idx < len(clean_row) and clean_row[result_idx]:
                 pfas_res = clean_row[result_idx]
@@ -253,19 +252,27 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
             if pfas_res:
                 process_row_data("PFAS", pfas_res, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
             continue
-            
+        # --------------------------------
+
         if "test item" in item_lower: continue
 
         result_cell = ""
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        # 嘗試獲取 MDL 值供防呆 (Intertek 通常是 RL)
-        mdl_val = None
+        # --- v57.0 Fix: 防止誤抓 Limit/MDL ---
+        # 如果 Result 欄位的值 跟 Limit 或 MDL 欄位的值一模一樣，且不是 N.D.，則視為無效
+        # 這能防止因欄位錯位抓到 1000 或 5
+        if limit_idx != -1 and limit_idx < len(clean_row):
+             if result_cell == clean_row[limit_idx] and "nd" not in result_cell.lower():
+                 result_cell = "" # 丟棄，可能是抓錯欄位
+        
         if mdl_idx != -1 and mdl_idx < len(clean_row):
-             mdl_val = clean_row[mdl_idx]
+             if result_cell == clean_row[mdl_idx] and "nd" not in result_cell.lower():
+                 result_cell = "" # 丟棄，可能是抓錯欄位
+        # ----------------------------------
 
-        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val)
+        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
 def parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     item_idx = -1; result_idx = -1
@@ -369,7 +376,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt or "单位" in txt: unit_idx = c_idx
             
-            # v53.0: Result Detection
+            # Result Detection
             if sample_id and sample_id.lower() == txt:
                 result_idx = c_idx
             elif "result" in txt or "結果" in txt or "检测结果" in txt:
@@ -380,7 +387,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
 
     if item_idx == -1: item_idx = 0
     
-    # v53.0: The Ultimate Fallback - Last Column Strategy
+    # Last Column Strategy
     if result_idx == -1:
         cols = len(table[0])
         if cols > 1 and (cols - 1) not in [item_idx, mdl_idx, limit_idx, unit_idx]:
@@ -602,7 +609,7 @@ def detect_scanned_pdfs(uploaded_files):
     progress_text.empty()
     return scanned_files
 
-# --- 7. Main Engine (v56.0 Updated) ---
+# --- 7. Main Engine ---
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS}
@@ -645,9 +652,7 @@ def process_files(files):
                 if file_dates: all_dates.append((max(file_dates), filename))
                 company = identify_company(full_text_content[:2000])
                 
-                # v56.0: Global PFAS Check (If headers are found in text but not table)
                 if check_pfas_in_summary(full_text_content[:2000]):
-                    # We will append this as a "backup" result. If table parsing finds a better one, it will overwrite or coexist.
                     data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename, "source": 2})
                     debug_logs.append({"File": filename, "Element": "PFAS", "Value": "REPORT", "Type": "Summary"})
 
@@ -729,16 +734,15 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v56.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v56.0 Intertek 深度修復版)")
-    st.error("🛠️ v56.0：1. **Intertek 修正**：強制鎖定 Result 欄位，解決誤抓 RL/MDL 的問題；新增 PFAS 總結表格抓取與關鍵字觸發。 2. **完整整合**：包含 SGS A4 支援、CTI 防呆、圖片檔偵測與所有必要函式。")
+    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v57.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v57.0 Intertek 總結修復版)")
+    st.error("🛠️ v57.0：修正 Intertek 報告中 MDL 誤抓問題，強制鎖定 Result 欄位；新增 'All PFAS Substances' 總結行抓取功能。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 
     if uploaded_files:
         if st.button("🔄 開始分析"):
             
-            # 1. Scanned PDF Detection
             bad_files = detect_scanned_pdfs(uploaded_files)
             
             if bad_files:
@@ -749,7 +753,6 @@ if __name__ == "__main__":
                     st.write(f"- 📄 `{bf}`")
                 st.markdown("---")
 
-            # 2. Main Processing
             try:
                 result_data, debug_logs = process_files(uploaded_files)
                 df = pd.DataFrame(result_data)

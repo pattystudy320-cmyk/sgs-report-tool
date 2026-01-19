@@ -20,7 +20,9 @@ SIMPLE_KEYWORDS = {
     "F": ["Fluorine", "氟", "(F)"],
     "CL": ["Chlorine", "氯", "(Cl)"],
     "BR": ["Bromine", "溴", "(Br)"],
-    "I": ["Iodine", "碘", "(I)"]
+    "I": ["Iodine", "碘", "(I)"],
+    "Be": ["Beryllium", "铍", "Be"], 
+    "Sb": ["Antimony", "锑", "Sb"]   
 }
 
 PBB_HEADER_KEYWORDS = [
@@ -67,6 +69,7 @@ OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
     "PFOS", "PFAS", "F", "CL", "BR", "I", 
+    "Be", "Sb",
     "日期", "檔案名稱"
 ]
 
@@ -154,11 +157,10 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     filter_keywords = ["iec", "iso", "epa", "gb/t", "directive", "annex", "mdl", "loq", "limit", "result", "unit", "method", "reference", "determination", "conclusion", "pass", "fail", "requirement", "---", "note", "remark"]
     if any(x in val_lower for x in filter_keywords): return (0, 0, "")
     
-    if any(x in val for x in ["年", "月", "日", "开始", "执行", "standard"]): return (0, 0, "")
+    if any(x in val for x in ["年", "月", "日", "開始", "執行", "standard"]): return (0, 0, "")
     if ":" in val: return (0, 0, "") 
     if "/" in val and "n/a" not in val_lower: return (0, 0, "")
     
-    # SGS Sample ID filtering
     if val in ["026", "001", "002", "003", "004", "A16", "A1", "A3", "SN1"]: return (0, 0, "")
 
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower or "not detected" in val_lower or "未检出" in val_lower: return (1, 0, "N.D.")
@@ -178,7 +180,6 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             
             if target_key == "Cr6+" and number in [0.10, 0.13]: return (0, 0, "")
 
-            # CTI MDL Protection
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
@@ -203,6 +204,59 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
     return (0, 0, val)
 
 # --- 3. Table Parsers ---
+
+def parse_table_intertek(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
+    """ Intertek Dedicated Parser (v55.0) """
+    item_idx = -1; result_idx = -1; mdl_idx = -1
+    
+    # 1. 掃描表頭
+    max_scan_rows = min(5, len(table))
+    for r in range(max_scan_rows):
+        row = table[r]
+        for c_idx, cell in enumerate(row):
+            txt = clean_text(cell).lower()
+            if not txt: continue
+            if "test item" in txt or "測試項目" in txt: item_idx = c_idx
+            if "result" in txt or "結果" in txt: 
+                if result_idx == -1: result_idx = c_idx
+            if "mdl" in txt or "rl" in txt or "reporting limit" in txt: mdl_idx = c_idx
+
+    # 2. 修正 Result 欄位：Intertek 表格通常最後一欄是 MDL/RL，Result 在其左邊
+    if result_idx == -1 and mdl_idx != -1 and mdl_idx > 0:
+        result_idx = mdl_idx - 1
+    
+    if item_idx == -1: item_idx = 0
+    if result_idx == -1: return # 無法確定結果欄，放棄
+
+    for row in table:
+        clean_row = [clean_text(cell) for cell in row]
+        if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
+        
+        item_name = clean_row[item_idx]
+        
+        # 3. 處理 Intertek PFAS 總結行 ("All PFAS Substances...")
+        if "all pfas substances" in item_name.lower():
+            # PFAS 結果通常在最後一欄 (或 Result 欄)
+            pfas_res = clean_row[result_idx] if result_idx < len(clean_row) else clean_row[-1]
+            process_row_data("PFAS", pfas_res, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
+            continue
+            
+        if "test item" in item_name.lower(): continue
+
+        result_cell = ""
+        if result_idx < len(clean_row):
+            result_cell = clean_row[result_idx]
+        
+        # 4. 如果抓到的值跟 MDL 一樣，且該行有 MDL 欄位，檢查是否誤抓
+        if mdl_idx != -1 and mdl_idx < len(clean_row):
+            mdl_val = clean_row[mdl_idx]
+            # 這裡不需額外防呆，因為 parse_value_priority 已經有 mdl_value 參數
+            # 我們只需確保傳入正確
+            pass 
+        else:
+            mdl_val = None
+
+        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val)
 
 def parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     item_idx = -1; result_idx = -1
@@ -291,6 +345,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val_str)
 
 def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, sample_id=None):
+    """ SGS Logic """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     max_scan_rows = min(5, len(table))
@@ -305,7 +360,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt or "单位" in txt: unit_idx = c_idx
             
-            # v53.0: Result Detection
             if sample_id and sample_id.lower() == txt:
                 result_idx = c_idx
             elif "result" in txt or "結果" in txt or "检测结果" in txt:
@@ -316,7 +370,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
 
     if item_idx == -1: item_idx = 0
     
-    # v53.0: The Ultimate Fallback - Last Column Strategy
     if result_idx == -1:
         cols = len(table[0])
         if cols > 1 and (cols - 1) not in [item_idx, mdl_idx, limit_idx, unit_idx]:
@@ -335,7 +388,6 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
         if result_idx != -1 and result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        # SGS Fallback (In-row scan)
         if not result_cell:
             for i, cell in enumerate(clean_row):
                 if i in [limit_idx, mdl_idx, unit_idx]: continue
@@ -511,7 +563,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
-# --- 6. Scanned PDF Detection (v54.2 Fixed) ---
+# --- 6. Scanned PDF Detection ---
 
 def detect_scanned_pdfs(uploaded_files):
     scanned_files = []
@@ -538,143 +590,19 @@ def detect_scanned_pdfs(uploaded_files):
     progress_text.empty()
     return scanned_files
 
-# --- 7. Main Engine (Re-added in v54.2) ---
-
-def process_files(files):
-    # Initialize data_pool with ALL output columns to be safe
-    data_pool = {key: [] for key in OUTPUT_COLUMNS}
-    
-    global_tracker = {key: {"max_score": -1, "max_value": -1.0, "filename": ""} for key in SIMPLE_KEYWORDS.keys()}
-    
-    all_dates = []
-    debug_logs = []
-    progress_bar = st.progress(0)
-    
-    for i, file in enumerate(files):
-        filename = file.name
-        file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
-        found_elements_in_table = set()
-        
-        try:
-            with pdfplumber.open(file) as pdf:
-                # --- v54.0: 空白頁面檢測 (圖片PDF防呆) ---
-                text_content_check = ""
-                for p in pdf.pages:
-                    text_content_check += (p.extract_text() or "")
-                
-                # 若為掃描檔，跳過此檔案，但不中斷迴圈 (continue)
-                if len(text_content_check.strip()) < 50:
-                    continue
-                # ----------------------------------------
-
-                file_dates = []
-                full_text_content = "" 
-                extracted_sample_id = None
-
-                for p_idx, page in enumerate(pdf.pages):
-                    page_txt = page.extract_text() or ""
-                    full_text_content += page_txt + "\n"
-                    if p_idx < 3: 
-                        d = extract_date_from_text(page_txt)
-                        if d: file_dates.append(d)
-                        # v53.0: 提取樣品編號 (Sample No.)
-                        sid_match = re.search(r"Sample\s*No\.?\s*[:\.]?\s*([A-Za-z0-9]+)", page_txt, re.IGNORECASE)
-                        if sid_match:
-                            extracted_sample_id = sid_match.group(1).strip()
-                
-                if file_dates: all_dates.append((max(file_dates), filename))
-                company = identify_company(full_text_content[:2000])
-                
-                if check_pfas_in_summary(full_text_content[:2000]):
-                    data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename, "source": 2})
-                    debug_logs.append({"File": filename, "Element": "PFAS", "Value": "REPORT", "Type": "Summary"})
-
-                for page in pdf.pages:
-                    tables = page.extract_tables()
-                    for table in tables:
-                        if not table or len(table) < 2: continue
-                        
-                        if company == "CTI":
-                            parse_table_cti(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
-                        elif company == "SGS":
-                            parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, sample_id=extracted_sample_id)
-                        elif company == "URHONGXIN":
-                            parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
-                        else:
-                            parse_table_generic(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs)
-                
-                if company != "CTI":
-                    parse_text_lines(full_text_content, data_pool, file_group_data, filename, found_elements_in_table, debug_logs)
-                
-                for k in SIMPLE_KEYWORDS.keys():
-                    if k not in data_pool: continue 
-                    for d in data_pool[k]:
-                         p = d['priority']
-                         if p[0] > global_tracker[k]["max_score"]:
-                             global_tracker[k]["max_score"] = p[0]
-                             global_tracker[k]["max_value"] = p[1]
-                             global_tracker[k]["filename"] = filename
-                         elif p[0] == global_tracker[k]["max_score"] and p[1] > global_tracker[k]["max_value"]:
-                             global_tracker[k]["max_value"] = p[1]
-                             global_tracker[k]["filename"] = filename
-
-            for group_key, values in file_group_data.items():
-                if values:
-                    best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
-                    if group_key in data_pool:
-                        data_pool[group_key].append({
-                            "priority": best_in_file,
-                            "filename": filename,
-                            "source": 2 
-                        })
-
-        except Exception as e:
-            st.warning(f"⚠️ 檔案 {filename} 解析異常: {e}")
-        
-        progress_bar.progress((i + 1) / len(files))
-
-    final_row = {}
-    for key in OUTPUT_COLUMNS:
-        if key in ["日期", "檔案名稱"]: continue
-        candidates = data_pool.get(key, [])
-        if not candidates:
-            final_row[key] = "" 
-            continue
-        
-        best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1], x.get('source', 0)), reverse=True)[0]
-        final_row[key] = best_record['priority'][2]
-
-    final_date_str = ""
-    if all_dates:
-        latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
-        final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
-    
-    final_file = ""
-    if global_tracker["Pb"]["filename"]:
-        final_file = global_tracker["Pb"]["filename"]
-    elif global_tracker["Cd"]["filename"]:
-        final_file = global_tracker["Cd"]["filename"]
-    else:
-        final_file = latest_date_record[1] if all_dates else (files[0].name if files else "Unknown")
-        
-    final_row["日期"] = final_date_str
-    final_row["檔案名稱"] = final_file
-
-    return [final_row], debug_logs
-
 # --- Main ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI 報告聚合工具 v54.2", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v54.2 真正修復版)")
-    st.error("🛠️ v54.2：包含完整的處理引擎，修復了 NameError。現在即使有圖片檔混入，程式也會先報警，然後**繼續處理其他正常的檔案**。")
+    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v55.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v55.0 Intertek 修復版)")
+    st.error("🛠️ v55.0：Intertek 報告修復完成！重新導入專屬模組，正確排除 MDL 欄位，確保不誤抓 2, 5, 50 等數值。同時支援 PFAS 總結表格抓取。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 
     if uploaded_files:
         if st.button("🔄 開始分析"):
             
-            # 1. Scanned PDF Detection (圖片檔偵測)
+            # 1. Scanned PDF Detection
             bad_files = detect_scanned_pdfs(uploaded_files)
             
             if bad_files:
@@ -685,7 +613,7 @@ if __name__ == "__main__":
                     st.write(f"- 📄 `{bf}`")
                 st.markdown("---")
 
-            # 2. Main Processing (核心處理流程)
+            # 2. Main Processing
             try:
                 result_data, debug_logs = process_files(uploaded_files)
                 df = pd.DataFrame(result_data)

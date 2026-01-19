@@ -21,7 +21,6 @@ SIMPLE_KEYWORDS = {
     "CL": ["Chlorine", "氯", "(Cl)"],
     "BR": ["Bromine", "溴", "(Br)"],
     "I": ["Iodine", "碘", "(I)"]
-    # 移除了 Be, Sb
 }
 
 PBB_HEADER_KEYWORDS = [
@@ -60,7 +59,6 @@ GROUP_KEYWORDS = {
     ]
 }
 
-# 擴充 PFAS 偵測關鍵字 (針對 Intertek)
 PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物质", "全氟烷基物质",
     "Per- and Polyfluoroalkyl Substances (PFAS)"
@@ -184,7 +182,11 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
-            if mdl_value and mdl_value != "CTI_MODE":
+            # v58.0: Intertek Limit Protection (New)
+            if mdl_value == "INTERTEK_LIMIT":
+                if target_key in ["PBB", "PBDE"] and number in [1000.0]: return (0, 0, "")
+
+            if mdl_value and "MODE" not in str(mdl_value):
                 try:
                     mdl_num = float(mdl_value)
                     if number == mdl_num: return (0, 0, "") 
@@ -208,10 +210,9 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 
 def parse_table_intertek(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
-    Intertek Dedicated Parser (v57.1)
-    1. 優先鎖定 'Result' 欄位
-    2. 強制禁止讀取 Limit/MDL 欄位
-    3. 支援 'All PFAS Substances' 總結行
+    Intertek Dedicated Parser (v58.0)
+    1. Limit/MDL Column Exclusion: Explicitly ban these columns.
+    2. 1000 Protection: Force drop 1000 for PBB/PBDE.
     """
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1
     
@@ -227,7 +228,7 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
             if "mdl" in txt or "rl" in txt or "reporting limit" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
 
-    # 校正：若有 MDL 但沒 Result，通常 Result 在 MDL 左邊
+    # 校正 Result 欄位
     if result_idx == -1 and mdl_idx != -1 and mdl_idx > 0:
         result_idx = mdl_idx - 1
     
@@ -241,7 +242,7 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
         item_name = clean_row[item_idx]
         item_lower = item_name.lower()
         
-        # PFAS 總結行抓取
+        # PFAS Table Summary Check
         if "all pfas substances" in item_lower:
             pfas_res = ""
             if result_idx < len(clean_row) and clean_row[result_idx]:
@@ -256,24 +257,17 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
         if "test item" in item_lower: continue
 
         result_cell = ""
+        # 嚴格只抓 Result 欄位
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        # 防止誤抓 Limit/MDL
+        # 雙重防呆：如果抓到的值跟 Limit 欄位一樣 (且不是 ND)，丟棄
         if limit_idx != -1 and limit_idx < len(clean_row):
              if result_cell == clean_row[limit_idx] and "nd" not in result_cell.lower():
                  result_cell = "" 
-        
-        if mdl_idx != -1 and mdl_idx < len(clean_row):
-             if result_cell == clean_row[mdl_idx] and "nd" not in result_cell.lower():
-                 result_cell = "" 
-        
-        # 獲取 MDL 值供防呆
-        mdl_val = None
-        if mdl_idx != -1 and mdl_idx < len(clean_row):
-             mdl_val = clean_row[mdl_idx]
 
-        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val)
+        # 傳遞 INTERTEK_LIMIT 模式給解析器，觸發 1000 過濾
+        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value="INTERTEK_LIMIT")
 
 def parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     item_idx = -1; result_idx = -1
@@ -521,11 +515,19 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
 
 def parse_text_lines(text, data_pool, file_group_data, filename, found_elements, debug_logs):
     lines = text.split('\n')
+    
+    # v58.0: 報告章節偵測 (PFAS)
+    pfas_found_in_text = False
+    
     for line in lines:
         line_clean = clean_text(line)
         if not line_clean: continue
-        
         line_lower = line_clean.lower()
+        
+        # PFAS 章節偵測
+        if "2. per- and polyfluoroalkyl substances" in line_lower:
+             pfas_found_in_text = True
+
         if "test method" in line_lower or "reference to" in line_lower: continue
         if "directive" in line_lower and "2011/65" in line_lower: continue
         if "remark" in line_lower or "note" in line_lower: continue 
@@ -582,6 +584,10 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                     })
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
+
+    # 如果有看到 PFAS 章節標題，補上 REPORT 狀態
+    if pfas_found_in_text:
+        data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename, "source": 2})
 
 # --- 6. Scanned PDF Detection ---
 
@@ -735,9 +741,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v57.1", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v57.1 欄位精簡版)")
-    st.error("🛠️ v57.1：移除了 Be 與 Sb 欄位。針對 Intertek 報告的 'Result' 與 'Limit/MDL' 欄位錯位問題進行了修正，並確保 PFAS 標題關鍵字也能觸發 REPORT 狀態。")
+    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v58.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v58.0 Intertek 終極版)")
+    st.error("🛠️ v58.0：Intertek 報告：1. 強制禁止抓取 Limit/MDL 欄位，解決 1000/5 誤判。 2. 新增 PFAS 章節標題偵測，確保有測就有顯示。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

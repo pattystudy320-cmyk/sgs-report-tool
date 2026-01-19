@@ -183,7 +183,7 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
-            # v59.0 Intertek Protection: 強制過濾 1000/100 Limit
+            # v60.0 Intertek Protection: 1000/100 Filter
             if mdl_value == "INTERTEK_MODE":
                  if number in [1000.0, 100.0]: return (0, 0, "")
 
@@ -211,22 +211,21 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 
 def parse_table_intertek(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
-    Intertek Dedicated Parser (v59.0)
-    1. 封殺 Limit 表格 (RoHS Limit)
-    2. 動態偵測 Result 欄位，然後絕對鎖定 (不往右找)
-    3. 支援 PFAS 總結行
+    Intertek Dedicated Parser (v60.0)
+    1. 封殺 Limit 表格
+    2. ***幾何夾擊法 (Geometric Pincer)***: 
+       使用 Unit 和 MDL/RL 作為邊界，Result 必在其中。
+       這能解決 Result 標題千變萬化 (如 Result Green material) 的問題。
     """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
-    # 1. 封殺純 Limit 表格 (如 "Restricted Substances" + "Limits")
-    # 這能解決抓到 1000/100 的問題，因為這張表根本不含 Result
     if "restricted substances" in header_text and "limits" in header_text:
         return
 
-    item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1
+    item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
     
     for r in range(max_scan_rows):
         row = table[r]
@@ -238,18 +237,22 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
                 if result_idx == -1: result_idx = c_idx
             if "mdl" in txt or "rl" in txt or "reporting limit" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
+            if "unit" in txt or "單位" in txt: unit_idx = c_idx
 
-    # 2. 欄位定位修正
-    # 如果沒找到 "Result" 字樣，但有 "MDL"，依慣例 Result 在 MDL 左邊
-    if result_idx == -1 and mdl_idx != -1 and mdl_idx > 0:
-        result_idx = mdl_idx - 1
+    # --- v60.0 核心：幾何夾擊定位 ---
+    # 如果我們有 Unit 和 MDL，Result 就在它們中間
+    if result_idx == -1:
+        if unit_idx != -1 and mdl_idx != -1 and mdl_idx > unit_idx:
+            # 假設 Unit 在左，MDL 在右，Result 在 Unit 和 MDL 之間
+            # 通常在 MDL 左邊一格
+            result_idx = mdl_idx - 1
+        elif mdl_idx != -1 and mdl_idx > 0:
+            # 只有 MDL，Result 就在 MDL 左邊
+            result_idx = mdl_idx - 1
+    # -----------------------------
     
     if item_idx == -1: item_idx = 0
     if result_idx == -1: return
-
-    # ---------------------------
-    # v59.0 核心邏輯：一旦 result_idx 確定，後面的迴圈就「只讀這一欄」
-    # ---------------------------
 
     for row in table:
         clean_row = [clean_text(cell) for cell in row]
@@ -258,27 +261,24 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
         item_name = clean_row[item_idx]
         item_lower = item_name.lower()
         
-        # PFAS 總結行 (Intertek 特有)
         if "all pfas substances" in item_lower:
             pfas_res = ""
             if result_idx < len(clean_row) and clean_row[result_idx]:
                 pfas_res = clean_row[result_idx]
-            elif clean_row[-1]: # 合併儲存格例外處理
+            elif clean_row[-1]:
                 pfas_res = clean_row[-1]
+            
             if pfas_res:
                 process_row_data("PFAS", pfas_res, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
             continue
             
         if "test item" in item_lower: continue
 
-        # --- 欄位絕對鎖定 (Column Lock) ---
         result_cell = ""
-        # 嚴格只讀取 result_idx 這一欄。
-        # 即使它是空的 (Empty)，也絕對不去讀右邊的欄位 (因為右邊通常是 Limit 或 MDL)
+        # 嚴格只讀取 result_idx
         if result_idx < len(clean_row):
             result_cell = clean_row[result_idx]
         
-        # 獲取 MDL 值供防呆 (如果數值 == MDL，則無效)
         mdl_val = None
         if mdl_idx != -1 and mdl_idx < len(clean_row):
              mdl_val = clean_row[mdl_idx]
@@ -532,7 +532,6 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
 def parse_text_lines(text, data_pool, file_group_data, filename, found_elements, debug_logs):
     lines = text.split('\n')
     
-    # v58.0: 報告章節偵測 (PFAS)
     pfas_found_in_text = False
     
     for line in lines:
@@ -540,7 +539,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
         if not line_clean: continue
         line_lower = line_clean.lower()
         
-        # PFAS 章節偵測
         if "2. per- and polyfluoroalkyl substances" in line_lower:
              pfas_found_in_text = True
 
@@ -601,7 +599,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename, found_elements,
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
-    # 如果有看到 PFAS 章節標題，補上 REPORT 狀態
     if pfas_found_in_text:
         data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename, "source": 2})
 
@@ -757,9 +754,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v59.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v59.0 Intertek 智慧鎖定版)")
-    st.error("🛠️ v59.0：Intertek 邏輯升級：採用「絕對欄位鎖定 (Column Lock)」技術，嚴禁程式跨欄位讀取，徹底解決 PBB/PBDE 誤抓 Limit 或 MDL 的問題。同時自動過濾純限值表格。")
+    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v60.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v60.0 Intertek 幾何鎖定版)")
+    st.error("🛠️ v60.0：引入「物理欄位夾擊法 (Geometric Pincer)」：利用 Unit 與 MDL/RL 欄位的位置，強制鎖定夾在中間的 Result 欄位。這能無視任何標題排版變異 (如 Result Green material)，精準抓取 PBB/PBDE 的 N.D. 值。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

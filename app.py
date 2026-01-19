@@ -183,9 +183,9 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
-            # v60.1 Intertek Protection: 強制過濾 1000/100 Limit
+            # v61.0 Intertek Protection: 強制過濾 1000/100/5 Limit
             if mdl_value == "INTERTEK_MODE":
-                 if number in [1000.0, 100.0]: return (0, 0, "")
+                 if number in [1000.0, 100.0, 5.0, 2.0]: return (0, 0, "")
 
             if mdl_value and "MODE" not in str(mdl_value):
                 try:
@@ -211,16 +211,16 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 
 def parse_table_intertek(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
-    Intertek Dedicated Parser (v60.1)
-    1. 封殺 Limit 表格
-    2. 智慧盲抓 (Smart Blind-Grab): 如果找不到標題，但看到 PBB/PBDE 關鍵字，直接鎖定倒數第二欄為結果。
+    Intertek Dedicated Parser (v61.0)
+    1. 只封殺標題含 "Restricted Substances" 的表 (Limit 表)。
+    2. PBB/PBDE: 掃描整行，如果發現 "ND"，直接抓取，完全無視 Limit/MDL 欄位。
     """
     header_text = ""
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
-    # 1. 封殺純 Limit 表格
+    # 1. 精準封殺 Limit 表 (避免誤殺 Result 表)
     if "restricted substances" in header_text and "limits" in header_text:
         return
 
@@ -238,17 +238,15 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "unit" in txt or "單位" in txt: unit_idx = c_idx
 
-    # 2. 幾何夾擊定位 Result 欄位
-    if result_idx == -1:
-        if unit_idx != -1 and mdl_idx != -1 and mdl_idx > unit_idx:
-            result_idx = mdl_idx - 1
-        elif mdl_idx != -1 and mdl_idx > 0:
-            result_idx = mdl_idx - 1
+    # 2. 欄位定位修正
+    if result_idx == -1 and mdl_idx != -1 and mdl_idx > 0:
+        result_idx = mdl_idx - 1
     
     if item_idx == -1: item_idx = 0
-    
-    # v60.1: 即使 result_idx 還是 -1，我們不放棄，進入行掃描
-    # 如果在行裡面發現 Monobrominated... 等字眼，我們就啟用「盲抓模式」
+    if result_idx == -1: 
+        # 如果真的完全找不到 Result，啟用盲抓：倒數第二欄
+        cols = len(table[0])
+        if cols >= 3: result_idx = cols - 2
 
     for row in table:
         clean_row = [clean_text(cell) for cell in row]
@@ -260,47 +258,39 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
         # PFAS 總結行
         if "all pfas substances" in item_lower:
             pfas_res = ""
-            # PFAS 結果位置猜測
-            if result_idx != -1 and result_idx < len(clean_row) and clean_row[result_idx]:
+            if result_idx < len(clean_row) and clean_row[result_idx]:
                 pfas_res = clean_row[result_idx]
             elif clean_row[-1]:
                 pfas_res = clean_row[-1]
-            
             if pfas_res:
                 process_row_data("PFAS", pfas_res, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
             continue
             
         if "test item" in item_lower: continue
 
-        # --- v60.1 智慧盲抓 ---
-        # 檢查這行是不是 PBB/PBDE 的子項目
-        is_pbb_pbde_item = "monobrominated" in item_lower or "dibrominated" in item_lower or "tribrominated" in item_lower
+        # --- v61.0 核心邏輯：ND 優先權 (ND King) ---
+        # 針對 Intertek，不管欄位怎麼定位，只要這行有 ND，它就是結果！
+        # 這是最簡單也最有效的邏輯，因為 Limit/MDL 欄位絕對不會寫 "ND"
+        final_result = ""
+        found_nd = False
         
-        current_result_idx = result_idx
+        for cell in clean_row:
+            if "nd" in cell.lower() or "n.d." in cell.lower():
+                final_result = "N.D."
+                found_nd = True
+                break
         
-        # 如果是 PBB/PBDE 子項目，且我們還沒找到 Result 欄位
-        if is_pbb_pbde_item and current_result_idx == -1:
-            # 強制假設：Intertek PBB/PBDE 表格，倒數第二欄是結果，倒數第一欄是 MDL
-            if len(clean_row) >= 3:
-                current_result_idx = len(clean_row) - 2
-        
-        # 如果還是沒找到欄位，且不是 PBB/PBDE，就跳過
-        if current_result_idx == -1: continue
+        # 如果沒找到 ND，才去依賴欄位定位
+        if not found_nd:
+            if result_idx < len(clean_row):
+                final_result = clean_row[result_idx]
 
-        result_cell = ""
-        if current_result_idx < len(clean_row):
-            result_cell = clean_row[current_result_idx]
-        
         # 獲取 MDL 值供防呆
         mdl_val = None
-        # 如果有找到 MDL 標題，用標題索引
         if mdl_idx != -1 and mdl_idx < len(clean_row):
              mdl_val = clean_row[mdl_idx]
-        # 如果沒找到標題，但我們啟用了盲抓，假設最後一欄是 MDL
-        elif is_pbb_pbde_item and len(clean_row) > 0:
-             mdl_val = clean_row[-1]
 
-        process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val or "INTERTEK_MODE")
+        process_row_data(item_name, final_result, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value=mdl_val or "INTERTEK_MODE")
 
 def parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     item_idx = -1; result_idx = -1
@@ -773,9 +763,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v60.1", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v60.1 智慧盲抓版)")
-    st.error("🛠️ v60.1：針對 Intertek 表格斷裂與標題缺失問題，引入「智慧盲抓 (Smart Blind-Grab)」邏輯。只要偵測到 PBB/PBDE 子項目，即使沒有 Result 標題，也會強制鎖定倒數第二欄抓取數據，並強力封殺 1000/100 等限值表格。")
+    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v61.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v61.0 Intertek ND 優先版)")
+    st.error("🛠️ v61.0：邏輯重構：針對 Intertek，無論欄位如何錯位，只要程式在該行掃描到 'ND' 或 'N.D.'，絕對優先抓取！同時強制過濾 1000/100/5 等數值，杜絕誤抓 Limit 或 MDL 的可能性。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

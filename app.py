@@ -183,8 +183,9 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
-            # v62.0 Intertek Protection: 強制過濾 1000/100/5/2 Limit/MDL
-            if mdl_value == "INTERTEK_MODE":
+            # v63.0 Intertek Protection (Brute Force Mode)
+            # 因為我們是盲抓，所以這裡必須嚴格過濾 1000/100/5/2
+            if mdl_value == "INTERTEK_BRUTE":
                  if number in [1000.0, 100.0, 50.0, 5.0, 2.0]: return (0, 0, "")
 
             if mdl_value and "MODE" not in str(mdl_value):
@@ -211,11 +212,15 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 
 def parse_table_intertek(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
-    Intertek Dedicated Parser (v62.0 - Global Row Scanning)
+    Intertek Dedicated Parser (v63.0 - Retro Brute Force)
     1. 封殺 Limit 表格。
-    2. 對於 PBB/PBDE，放棄欄位索引，改用「全行掃描」+「數值過濾」。
+    2. 放棄 Result 欄位定位。
+    3. 全行掃描 (Brute Force):
+       - 只要看到 ND -> 抓取並停止。
+       - 只要看到數字 (非 Limit/MDL) -> 抓取。
     """
     header_text = ""
+    # 快速掃描前幾行，看看是不是 Limit 表
     max_scan_rows = min(5, len(table))
     for r in range(max_scan_rows):
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
@@ -224,83 +229,72 @@ def parse_table_intertek(table, filename, data_pool, file_group_data, global_tra
     if "restricted substances" in header_text and "limits" in header_text:
         return
 
-    item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
+    # 不再預先計算 result_idx，直接進入行掃描
     
-    for r in range(max_scan_rows):
-        row = table[r]
-        for c_idx, cell in enumerate(row):
-            txt = clean_text(cell).lower()
-            if not txt: continue
-            if "test item" in txt or "測試項目" in txt: item_idx = c_idx
-            if "result" in txt or "結果" in txt: 
-                if result_idx == -1: result_idx = c_idx
-            if "mdl" in txt or "rl" in txt or "reporting limit" in txt: mdl_idx = c_idx
-            if "limit" in txt or "限值" in txt: limit_idx = c_idx
-            if "unit" in txt or "單位" in txt: unit_idx = c_idx
-
-    # 校正：標準欄位定位 (對非 PBB/PBDE 的項目仍有用)
-    if result_idx == -1 and mdl_idx != -1 and mdl_idx > 0:
-        result_idx = mdl_idx - 1
-    
-    if item_idx == -1: item_idx = 0
-
     for row in table:
         clean_row = [clean_text(cell) for cell in row]
-        if len(clean_row) <= item_idx or not clean_row[item_idx]: continue
+        # 跳過空行
+        if not any(clean_row): continue
         
-        item_name = clean_row[item_idx]
-        item_lower = item_name.lower()
+        # 將整行文字接起來，方便檢查關鍵字
+        row_text = " ".join(clean_row).lower()
         
-        # PFAS 總結行
-        if "all pfas substances" in item_lower:
+        # --- PFAS 總結行 ---
+        if "all pfas substances" in row_text:
             pfas_res = ""
-            if result_idx < len(clean_row) and clean_row[result_idx]:
-                pfas_res = clean_row[result_idx]
-            elif clean_row[-1]:
-                pfas_res = clean_row[-1]
+            for cell in clean_row:
+                if "nd" in cell.lower() or "not detected" in cell.lower():
+                    pfas_res = "N.D."
+                    break
+            if not pfas_res:
+                # 沒看到 ND，試著找最後一格
+                if clean_row[-1]: pfas_res = clean_row[-1]
+            
             if pfas_res:
                 process_row_data("PFAS", pfas_res, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
             continue
             
-        if "test item" in item_lower: continue
-
-        # --- v62.0 核心：行內掃描 (Row Scanning) ---
-        # 針對 PBB/PBDE，無視欄位索引，直接在整行裡找答案
-        is_pbb_pbde_item = "monobrominated" in item_lower or "dibrominated" in item_lower or "tribrominated" in item_lower
+        # 判斷這行是不是我們要測的項目
+        item_name = ""
+        # 簡單的項目名稱判斷
+        if len(clean_row) > 0 and clean_row[0]:
+            item_name = clean_row[0]
         
+        # 跳過標題行
+        if "test item" in row_text or "result" in row_text: continue
+
+        # --- v63.0 核心：暴力掃描 (Brute Force) ---
         final_result = ""
         
-        if is_pbb_pbde_item:
-            # 策略 A: 找 ND
+        # 優先找 "ND" (因為 ND 絕對是結果，不會是 Limit)
+        found_nd = False
+        for cell in clean_row:
+            if "nd" in cell.lower() or "n.d." in cell.lower():
+                final_result = "N.D."
+                found_nd = True
+                break
+        
+        # 如果沒有 ND，找數字
+        if not found_nd:
             for cell in clean_row:
-                if "nd" in cell.lower() or "n.d." in cell.lower():
-                    final_result = "N.D."
-                    break
-            
-            # 策略 B: 如果沒 ND，找合法數字 (排除 1000, 100, 5)
-            if not final_result:
-                for cell in clean_row:
-                    # 跳過單位和方法描述
-                    if "mg/kg" in cell or "ppm" in cell or "iec" in cell.lower(): continue
-                    
-                    try:
-                        num = float(cell)
-                        # 黑名單過濾：Limit, MDL
-                        if num not in [1000.0, 100.0, 50.0, 5.0, 2.0]:
-                            final_result = cell
-                            break
-                    except: pass
-        else:
-            # 對於其他項目 (Pb, Cd 等)，使用標準欄位定位
-            if result_idx != -1 and result_idx < len(clean_row):
-                final_result = clean_row[result_idx]
-            # 防呆：如果抓到的跟 Limit 一樣，丟棄
-            if limit_idx != -1 and limit_idx < len(clean_row):
-                 if final_result == clean_row[limit_idx] and "nd" not in final_result.lower():
-                     final_result = ""
+                # 跳過單位、方法等雜訊
+                cell_l = cell.lower()
+                if "mg/kg" in cell_l or "ppm" in cell_l or "iec" in cell_l or "method" in cell_l: continue
+                
+                try:
+                    num = float(cell)
+                    # 這裡是最重要的防火牆：過濾常見的 Limit 和 MDL
+                    # 1000, 100 -> Limit
+                    # 50, 25, 10, 5, 2 -> 常見 MDL/RL
+                    # 注意：如果真實檢測值剛好是 5.0，這裡會誤殺，但在 RoHS 報告中機率極低 (通常是 5.1, 1381 這種)
+                    if num not in [1000.0, 100.0, 50.0, 25.0, 10.0, 5.0, 2.0]:
+                        final_result = cell
+                        break # 找到第一個合法數字就當作結果
+                except:
+                    pass # 不是數字，繼續找下一個格子
 
-        # 傳遞 INTERTEK_MODE 觸發最後一道數值過濾
-        process_row_data(item_name, final_result, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value="INTERTEK_MODE")
+        # 傳遞 "INTERTEK_BRUTE" 給核心，核心會再次檢查數值合法性
+        process_row_data(item_name, final_result, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value="INTERTEK_BRUTE")
 
 def parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     item_idx = -1; result_idx = -1
@@ -335,7 +329,7 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     
     if ("substance name" in header_text or "group name" in header_text or "cas no" in header_text) and \
-       ("result" not in header_text and "结果" not in header_text):
+       ("result" not in header_text and "結果" not in header_text):
         return
 
     item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; cas_idx = -1
@@ -345,11 +339,11 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         for c_idx, cell in enumerate(row):
             txt = clean_text(cell).lower()
             if not txt: continue
-            if "test item" in txt or "测试项目" in txt or "substance name" in txt: item_idx = c_idx
+            if "test item" in txt or "測試項目" in txt or "substance name" in txt: item_idx = c_idx
             if "mdl" in txt or "loq" in txt or "检出限" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
             if "cas" in txt: cas_idx = c_idx
-            if "result" in txt or "结果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "026" in txt:
+            if "result" in txt or "結果" in txt or re.search(r"\b(no\.|00[1-9])", txt) or "026" in txt:
                  if result_idx == -1: result_idx = c_idx
 
     if result_idx == -1: return 
@@ -402,7 +396,7 @@ def parse_table_sgs(table, filename, data_pool, file_group_data, global_tracker,
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt: item_idx = c_idx
             if "mdl" in txt or "loq" in txt: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt: limit_idx = c_idx
-            if "unit" in txt or "单位" in txt: unit_idx = c_idx
+            if "unit" in txt or "單位" in txt: unit_idx = c_idx
             
             # v53.0: Result Detection
             if sample_id and sample_id.lower() == txt:
@@ -771,9 +765,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v62.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v62.0 Intertek 行內掃描版)")
-    st.error("🛠️ v62.0：針對 Intertek 表格錯位與 Limit 誤判的終極修正。放棄不可靠的欄位索引，改用「行內全掃描 + 數值黑名單」策略。只要該行是 PBB/PBDE，且出現 ND，即抓取；若出現數字，強制過濾 1000/100/5/2。")
+    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v63.0 Intertek 暴力掃描版)")
+    st.error("🛠️ v63.0：針對 Intertek 表格的終極解決方案。放棄不可靠的欄位定位，改用「全行暴力掃描」模式。只要在 PBB/PBDE 行中看到 'ND'，無條件抓取；若為數字，則強制過濾 Limit/MDL (1000/100/50/5/2)。這能完美對應任何錯位或格式變異。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

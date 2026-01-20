@@ -5,9 +5,9 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字與黑名單定義 ---
+# --- 1. 關鍵字與黑名單 ---
 
-# Intertek 專用黑名單 (SGS/CTI 不用這個)
+# Intertek 專用黑名單
 VALUE_BLACKLIST_INTERTEK = [
     1000.0, 100.0, 50.0, 25.0, 20.0, 10.0, 8.0, 5.0, 2.0, 1.0, 
     0.5, 0.1, 0.05, 0.01, 
@@ -24,14 +24,12 @@ OUTPUT_COLUMNS = [
 
 PFAS_KEYWORDS = ["Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質"]
 
-# Intertek 專用子項目
 INTERTEK_SUB_KEYWORDS = [
     "monobrominated", "dibrominated", "tribrominated", "tetrabrominated", 
     "pentabrominated", "hexabrominated", "heptabrominated", "octabrominated", 
     "nonabrominated", "decabrominated", "monobb", "monobde"
 ]
 
-# SGS/CTI 通用關鍵字
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
     "Cd": ["Cadmium", "镉", "Cd", "카드뮴"], 
@@ -106,7 +104,7 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. INTERTEK 專用模組 (v72.0 邏輯 - 行內掃描) ---
+# --- 3. INTERTEK 模組 (v72.0 邏輯) ---
 
 def scan_row_for_intertek(row_cells):
     candidates_num = []
@@ -165,6 +163,15 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
         ("PBDE", INTERTEK_SUB_KEYWORDS + ["monobde"]),
     ]
 
+    full_text_content = ""
+    for page in pdf.pages:
+        text = page.extract_text() or ""
+        full_text_content += text
+    
+    if any(kw.lower() in full_text_content.lower() for kw in PFAS_KEYWORDS):
+        if not data_pool["PFAS"]:
+            data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
+
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
@@ -213,73 +220,112 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
                                 "filename": filename
                             })
 
-# --- 4. SGS / CTI 專用模組 (v54.2 邏輯 - 欄位鎖定) ---
+# --- 4. SGS / CTI 專用模組 (v54.2 復刻: Sample ID 鎖定) ---
 
-def process_sgs_cti(pdf, filename, company, data_pool, debug_logs):
+def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
     """
-    SGS/CTI 專用解析器：
-    1. 嚴格鎖定 'Result' 欄位。
-    2. 跳過 Summary/Conclusion 表格 (有 'Pass', 'Conclusion', 'Requirement' 字眼)。
-    3. 不進行全行掃描，避免抓到 Limit。
+    SGS/CTI v54.2 邏輯復刻：
+    1. 先抓 Sample ID (如 "A1", "004")。
+    2. 用 Sample ID 在表頭定位 Result 欄位。
+    3. 跳過 Summary/Conclusion 表格。
     """
+    
+    # 1. 提取 Sample ID
+    extracted_id = None
+    full_text = ""
+    for p in pdf.pages: full_text += (p.extract_text() or "") + "\n"
+    
+    # PFAS 檢查
+    if any(k.lower() in full_text.lower() for k in PFAS_KEYWORDS):
+         if not data_pool["PFAS"]:
+             data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
+
+    if company == "SGS":
+        # SGS 常見格式: "Sample No.: A1"
+        m = re.search(r"Sample\s*No\.?\s*[:\.]?\s*([A-Z0-9]+)", full_text, re.IGNORECASE)
+        if m: extracted_id = m.group(1).strip()
+    elif company == "CTI":
+        # CTI 常見格式: "Model No. : ... " -> 但 Result 欄位通常顯示 "Result 004"
+        # 嘗試抓取 3 位數編號
+        m = re.search(r"Result\s*(00\d)", full_text, re.IGNORECASE)
+        if m: extracted_id = m.group(1).strip()
+
+    # 2. 表格處理
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
 
-            # --- A. 表格篩選 (避開 Summary Table) ---
-            header_text = " ".join([str(c).lower() for row in table[:3] for c in row if c])
-            if "conclusion" in header_text or "pass" in header_text or "requirement" in header_text:
-                continue # 跳過摘要表
+            # --- A. 表格篩選 (避開 Summary) ---
+            header_rows = table[:5]
+            header_text = " ".join([str(c).lower() for row in header_rows for c in row if c])
+            
+            # 如果有 "Conclusion" 或 "Pass" 且沒有詳細數據特徵 (MDL/Unit)，跳過
+            if ("conclusion" in header_text or "pass" in header_text) and "mdl" not in header_text:
+                continue 
+            if "requirement" in header_text and "result" not in header_text:
+                continue
 
-            # --- B. 欄位定位 ---
+            # --- B. 欄位定位 (使用 Sample ID) ---
             item_idx = -1
             result_idx = -1
             
-            # 尋找 Test Item 和 Result 欄位
-            for r_idx, row in enumerate(table[:5]):
+            for r_idx, row in enumerate(header_rows):
                 for c_idx, cell in enumerate(row):
                     txt = clean_text(cell).lower()
+                    
+                    # Item 欄位
                     if "test item" in txt or "测试项目" in txt or "測試項目" in txt:
                         item_idx = c_idx
-                    # Result 必須精確，避免抓到 Requirement
-                    if ("result" in txt or "结果" in txt) and "requirement" not in txt and "limit" not in txt:
+                    
+                    # Result 欄位定位
+                    # 1. 優先匹配 Sample ID (如 "A1", "004")
+                    if extracted_id and extracted_id.lower() == txt:
                         result_idx = c_idx
+                    # 2. 其次匹配 "Result" 關鍵字 (SGS 有時寫 "Test Result(s)")
+                    elif ("result" in txt or "结果" in txt) and result_idx == -1:
+                        # 再次確認不是 Requirement
+                        if "requirement" not in txt:
+                            result_idx = c_idx
+
                 if item_idx != -1 and result_idx != -1: break
             
-            # 如果沒找到 Result 標題，SGS/CTI 通常最後一欄是結果
+            # Fallback: 如果沒找到 Result，試試看最後一欄 (常見於 CTI/SGS)
             if result_idx == -1 and len(table[0]) > 1:
                 result_idx = len(table[0]) - 1
             if item_idx == -1: item_idx = 0
 
-            # --- C. 內容抓取 (只讀取 Result 欄) ---
+            # --- C. 內容抓取 ---
             for r_idx in range(len(table)):
                 row = table[r_idx]
                 if len(row) <= result_idx: continue
                 
                 item_name = clean_text(row[item_idx])
-                # 跳過標題行本身
+                # 跳過標題行
                 if "test item" in item_name.lower() or "result" in item_name.lower(): continue
 
                 res_val = clean_text(row[result_idx])
                 
-                # 過濾無效值
-                if not res_val or "pass" in res_val.lower() or "conclude" in res_val.lower() or "limit" in res_val.lower(): 
+                # 過濾無效值 (Summary 表的殘留)
+                if "pass" in res_val.lower() or "conclude" in res_val.lower() or "limit" in res_val.lower(): 
                     continue
+                if not res_val: continue
 
-                # 匹配目標項目
+                # 匹配目標
                 for target, kws in SIMPLE_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
+                        # SGS/CTI: Result 欄位通常很乾淨 (ND 或 數字)
                         prio = 1 if "nd" in res_val.lower() else 3
                         try:
+                            # 移除 < >
                             num = float(re.sub(r"[<>]", "", res_val))
                         except: num = 0
                         
-                        # 簡單黑名單 (避免抓到極端值)
+                        # 簡單黑名單 (只擋年份等極端值)
                         if num not in [2011, 2015, 62321]: 
                              data_pool[target].append({"priority": (prio, num, res_val), "filename": filename})
 
-                # PBB/PBDE 群組處理 (SGS/CTI 通常有 Sum of PBBs 行)
+                # Group Logic
                 for group, kws in GROUP_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
                         if "nd" in res_val.lower():
@@ -296,28 +342,23 @@ def process_files(files):
         filename = file.name
         try:
             with pdfplumber.open(file) as pdf:
+                # 判斷廠商
                 first_page_text = pdf.pages[0].extract_text() or ""
                 company = identify_company(first_page_text)
                 
+                # 抓日期
                 for i in range(min(3, len(pdf.pages))):
                     d = extract_date_from_text(pdf.pages[i].extract_text())
                     if d: 
                         all_dates.append((d, filename))
                         break
                 
-                # PFAS 檢查 (全通用)
-                full_text_content = ""
-                for page in pdf.pages: full_text_content += (page.extract_text() or "")
-                if any(kw.lower() in full_text_content.lower() for kw in PFAS_KEYWORDS):
-                    if not data_pool["PFAS"]:
-                        data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
-
-                # 分流處理
+                # 分流
                 if company == "INTERTEK":
                     process_intertek(pdf, filename, data_pool, debug_logs)
                 else:
-                    # SGS 和 CTI 走同一套 v54.2 復刻邏輯
-                    process_sgs_cti(pdf, filename, company, data_pool, debug_logs)
+                    # SGS, CTI, URHONGXIN 都走 v54.2 復刻版
+                    parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs)
 
         except Exception as e:
             st.error(f"Error processing {filename}: {e}")
@@ -344,22 +385,8 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek Tool v76.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v76.0 徹底物理隔離版)")
-    st.info("💡 v76.0：Intertek (行內掃描) 與 SGS/CTI (欄位鎖定) 邏輯徹底分離。SGS/CTI 增加 'Pass/Conclusion' 表格跳過機制，防止抓到摘要。")
+    st.set_page_config(page_title="SGS/CTI/Intertek Tool v77.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v77.0 樣品編號鎖定版)")
+    st.info("💡 v77.0：Intertek (v72 邏輯) 與 SGS/CTI (v54.2 邏輯) 完美並存。SGS/CTI 恢復使用『樣品編號 (Sample ID)』來精準定位 Result 欄位，徹底解決抓到 'Pass' 的問題。")
 
-    uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
-
-    if uploaded_files:
-        if st.button("🔄 開始分析"):
-            result_data, debug_logs = process_files(uploaded_files)
-            df = pd.DataFrame(result_data)
-            for col in OUTPUT_COLUMNS:
-                if col not in df.columns: df[col] = ""
-            df = df[OUTPUT_COLUMNS]
-            
-            st.success("分析完成")
-            st.dataframe(df)
-            
-            with st.expander("Debug Logs"):
-                st.write(debug_logs)
+    uploaded_files = st.

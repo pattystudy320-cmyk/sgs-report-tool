@@ -7,18 +7,12 @@ from datetime import datetime
 
 # --- 1. 關鍵字與黑名單 ---
 
-# Intertek 專用黑名單
+# Intertek 專用數值黑名單
 VALUE_BLACKLIST_INTERTEK = [
     1000.0, 100.0, 50.0, 25.0, 20.0, 10.0, 8.0, 5.0, 2.0, 1.0, 
     0.5, 0.1, 0.05, 0.01, 
     2011.0, 2015.0, 2016.0, 2017.0, 2023.0, 2024.0, 2025.0,
     62321.0, 3052.0, 14582.0, 3540.0, 17681.0, 18219.0, 15968.0, 111.0
-]
-
-# 通用垃圾字串 (SGS/CTI 用)
-TEXT_BLACKLIST_GENERAL = [
-    "conclusion", "method", "unit", "mdl", "loq", "limit", 
-    "requirement", "icp-oes", "gc-ms", "uv-vis", "see results"
 ]
 
 OUTPUT_COLUMNS = [
@@ -52,10 +46,18 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
-# 補強 SGS 的 PBB/PBDE 總和關鍵字
+# v83.0: 補強 SGS 特有拼法 "Polybromobiphenyl"
 GROUP_KEYWORDS = {
-    "PBB": ["Polybrominated Biphenyls", "PBBs", "多溴聯苯", "多溴联苯", "Sum of PBBs", "多溴聯苯總和"],
-    "PBDE": ["Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚", "多溴聯苯醚", "Sum of PBDEs", "多溴聯苯醚總和"]
+    "PBB": [
+        "Polybrominated Biphenyls", "PBBs", "多溴聯苯", "多溴联苯", 
+        "Sum of PBBs", "多溴聯苯總和", 
+        "Polybromobiphenyl"  # SGS 特有寫法
+    ],
+    "PBDE": [
+        "Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚", "多溴聯苯醚", 
+        "Sum of PBDEs", "多溴聯苯醚總和",
+        "Polybromodiphenyl" # SGS 特有寫法
+    ]
 }
 
 # --- 2. 輔助函式 ---
@@ -66,14 +68,13 @@ def clean_text(text):
 
 def clean_value_final(val):
     """
-    v82.0 新增：最終數值清洗
-    1. 移除 CTI 報告中的倒三角 ▼、正三角 ▲
-    2. 移除 < > 符號
-    3. 如果是 N.D. 則統一回傳 N.D.
+    v83.0 更新：移除單位，確保只回傳純數字或狀態
     """
     if not val: return ""
-    # 移除特殊符號
+    # 1. 移除特殊符號
     val = val.replace("▼", "").replace("▲", "").strip()
+    # 2. 移除單位 (v83.0 新增)
+    val = val.replace("mg/kg", "").replace("ppm", "").replace("%", "").strip()
     
     val_lower = val.lower()
     if "nd" in val_lower or "n.d." in val_lower or "not detected" in val_lower:
@@ -130,7 +131,7 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. INTERTEK 專用模組 (v72.0 邏輯) ---
+# --- 3. INTERTEK 專用模組 (維持 v72.0) ---
 
 def scan_row_for_intertek(row_cells):
     candidates_num = []
@@ -232,7 +233,7 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
                         cells_to_scan = clean_row[hit_cell_index+1:]
                         val = scan_row_for_intertek(cells_to_scan)
                         if val:
-                            val_cleaned = clean_value_final(val) # v82.0 清洗
+                            val_cleaned = clean_value_final(val) # 使用 v83.0 清洗
                             
                             if "negative" in val_cleaned.lower(): priority_score = 4
                             elif "nd" in val_cleaned.lower(): priority_score = 1
@@ -248,7 +249,7 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
                                 "filename": filename
                             })
 
-# --- 4. SGS / CTI 專用模組 (v54.2 復刻 + 特徵鎖定) ---
+# --- 4. SGS / CTI 專用模組 (v54.2 復刻 + 特徵鎖定 + 單位清洗) ---
 
 def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
     # 1. 提取 Sample ID
@@ -281,6 +282,7 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
             header_rows = table[:5]
             header_text = " ".join([str(c).lower() for row in header_rows for c in row if c])
             
+            # 必須有 Unit 或 MDL
             has_data_feature = "unit" in header_text or "mdl" in header_text or "loq" in header_text or "limit" in header_text or "單位" in header_text or "極限" in header_text
             if not has_data_feature: continue 
 
@@ -325,9 +327,9 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
 
                 res_val = clean_text(row[result_idx])
                 if not res_val: continue
-                if "pass" in res_val.lower() or "fail" in res_val.lower(): continue # 摘要表殘留
+                if "pass" in res_val.lower() or "fail" in res_val.lower(): continue 
 
-                res_val_cleaned = clean_value_final(res_val) # v82.0 符號清洗
+                res_val_cleaned = clean_value_final(res_val) # v83.0 清洗單位
 
                 # 匹配單項
                 for target, kws in SIMPLE_KEYWORDS.items():
@@ -340,10 +342,9 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
                         if num not in [2011, 2015, 62321]: 
                              data_pool[target].append({"priority": (prio, num, res_val_cleaned), "filename": filename})
 
-                # 匹配群組 (PBB/PBDE Sum) - v82.0 重點修復
+                # 匹配群組 (PBB/PBDE Sum)
                 for group, kws in GROUP_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
-                        # SGS 的 Sum 行通常有值 (ND)
                         if "nd" in res_val_cleaned.lower():
                              data_pool[group].append({"priority": (1, 0, "N.D."), "filename": filename})
 
@@ -397,9 +398,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek Tool v82.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v82.0 符號清洗版)")
-    st.info("💡 v82.0：1. 修正 CTI 報告 'N.D. ▼' 顯示問題 (自動移除倒三角)。 2. 修復 SGS PBB/PBDE 總和抓取問題 (加入 'Sum of' 關鍵字)。 3. 邏輯架構維持：Intertek (v72) / SGS & CTI (v54.2 + 符號清洗)。")
+    st.set_page_config(page_title="SGS/CTI/Intertek Tool v83.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v83.0 單位清洗與關鍵字補強版)")
+    st.info("💡 v83.0：1. 修正 SGS 報告 'Polybromobiphenyl' 關鍵字漏抓問題。 2. 強制清洗結果欄位中的單位 (mg/kg, ppm)，解決 Pb 抓到 '8 mg/kg' 的問題。 3. 架構維持穩定 (Intertek v72 / SGS&CTI v54)。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

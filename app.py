@@ -23,36 +23,26 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
-# 為了防止誤抓 Limit 表的大標題，這裡只定義子項目關鍵字供群組識別用
-PBB_SUB_KEYWORDS = [
-    "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", "Tetrabromobiphenyl", 
-    "Pentabromobiphenyl", "Hexabromobiphenyl", "Heptabromobiphenyl", "Octabromobiphenyl", 
-    "Nonabromobiphenyl", "Decabromobiphenyl",
-    "Monobrominated biphenyl", "Dibrominated biphenyl", "Tribrominated biphenyl", 
-    "Tetrabrominated biphenyl", "Pentabrominated biphenyl", "Hexabrominated biphenyl", 
-    "Heptabrominated biphenyl", "Octabrominated biphenyl", "Nonabrominated biphenyl", 
-    "Decabrominated biphenyl",
-    "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB",
-    "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯"
+# 針對 Intertek，我們只定義「子項目」關鍵字，完全不看大標題
+# 這樣可以物理性地避開 Limit 表格 (因為 Limit 表只有大標題)
+INTERTEK_PBB_SUBS = [
+    "monobrominated biphenyl", "dibrominated biphenyl", "tribrominated biphenyl", 
+    "tetrabrominated biphenyl", "pentabrominated biphenyl", "hexabrominated biphenyl", 
+    "heptabrominated biphenyl", "octabrominated biphenyl", "nonabrominated biphenyl", 
+    "decabrominated biphenyl", "monobb", "dibb", "tribb", "tetrabb", "pentabb", "hexabb"
 ]
 
-PBDE_SUB_KEYWORDS = [
-    "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether", 
-    "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether", 
-    "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether", 
-    "Decabromodiphenyl ether",
-    "Monobrominated diphenyl ether", "Dibrominated diphenyl ether", "Tribrominated diphenyl ether", 
-    "Tetrabrominated diphenyl ether", "Pentabrominated diphenyl ether", "Hexabrominated diphenyl ether", 
-    "Heptabrominated diphenyl ether", "Octabrominated diphenyl ether", "Nonabrominated diphenyl ether", 
-    "Decabrominated diphenyl ether",
-    "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE",
-    "一溴二苯醚", "二溴二苯醚", "三溴二苯醚", "四溴二苯醚", "五溴二苯醚", "六溴二苯醚", "七溴二苯醚", "八溴二苯醚", "九溴二苯醚", "十溴二苯醚"
+INTERTEK_PBDE_SUBS = [
+    "monobrominated diphenyl", "dibrominated diphenyl", "tribrominated diphenyl", 
+    "tetrabrominated diphenyl", "pentabrominated diphenyl", "hexabrominated diphenyl", 
+    "heptabrominated diphenyl", "octabrominated diphenyl", "nonabrominated diphenyl", 
+    "decabrominated diphenyl", "monobde", "dibde", "tribde", "tetrabde", "pentabde", "hexabde"
 ]
 
-# GROUP_KEYWORDS 仍需包含大標題，供 SGS/CTI 使用，但 Intertek 專用解析器會繞過它
+# 其他廠商仍需大標題
 GROUP_KEYWORDS = {
-    "PBB": PBB_SUB_KEYWORDS + ["Polybrominated Biphenyls", "PBBs"],
-    "PBDE": PBDE_SUB_KEYWORDS + ["Polybrominated Diphenyl Ethers", "PBDEs"]
+    "PBB": INTERTEK_PBB_SUBS + ["Polybrominated Biphenyls", "PBBs"],
+    "PBDE": INTERTEK_PBDE_SUBS + ["Polybrominated Diphenyl Ethers", "PBDEs"]
 }
 
 PFAS_SUMMARY_KEYWORDS = [
@@ -179,9 +169,10 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
             if mdl_value == "CTI_MODE": 
                  if target_key in ["PBB", "PBDE"] and number in [5.0, 10.0, 25.0]: return (0, 0, "")
 
-            # v65.0 Intertek Protection: 強制過濾 1000/100/50/5/2 Limit/MDL
-            if mdl_value == "INTERTEK_MODE":
-                 if number in [1000.0, 100.0, 50.0, 5.0, 2.0]: return (0, 0, "")
+            # v66.0 Intertek 專用數值過濾器
+            if mdl_value == "INTERTEK_ROW_SCAN":
+                 # 這裡放寬一點，如果抓到 5 或 10，但前面沒有 ND，我們還是先把它當作無效，因為通常是 MDL
+                 if number in [1000.0, 100.0, 50.0, 10.0, 5.0, 2.0, 0.1]: return (0, 0, "")
 
             if mdl_value and "MODE" not in str(mdl_value):
                 try:
@@ -207,115 +198,120 @@ def parse_value_priority(value_str, target_key=None, is_table_result=False, is_t
 
 def parse_table_intertek(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     """ 
-    Intertek Dedicated Parser (v65.0 - Sub-Item Collection Strategy)
+    Intertek Dedicated Parser (v66.0 - Sub-Item Attack)
     邏輯：
-    1. 完全忽略大標題 (PBBs/PBDEs)，只找子項目 (Monobrominated...)。這能避開 Limit 表。
-    2. 找到子項目後，採用「倒數第二欄 (Result)」和「倒數第一欄 (MDL)」的固定結構抓取。
-    3. 收集所有子項目的值，最後由主程式彙整。
+    1. 不再尋找 Result 欄位，因為跨頁表格可能沒有表頭。
+    2. 只尋找 PBB/PBDE 的「子項目」行 (Monobrominated...)。
+    3. 對於子項目行，進行「行內雷達掃描」：
+       - 優先找 "ND"。
+       - 沒 ND 找數字 (但過濾 Limit/MDL)。
     """
     
-    # 預先定義子項目小寫集合，加速比對
-    pbb_subs = [x.lower() for x in PBB_SUB_KEYWORDS]
-    pbde_subs = [x.lower() for x in PBDE_SUB_KEYWORDS]
+    # 預處理：掃描是否有 PFAS 總結 (這個通常有固定格式)
+    for row in table:
+        row_str = " ".join([str(c) for c in row if c]).lower()
+        if "all pfas substances" in row_str:
+            pfas_res = ""
+            for cell in row:
+                c_txt = clean_text(cell)
+                if "nd" in c_txt.lower() or "not detected" in c_txt.lower():
+                    pfas_res = "N.D."
+                    break
+            if not pfas_res and row[-1]: pfas_res = clean_text(row[-1])
+            
+            if pfas_res:
+                process_row_data("PFAS", pfas_res, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
 
-    item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1; unit_idx = -1
+    # ----------------------------------------------------
+    # 一般項目 & PBB/PBDE 處理
+    # ----------------------------------------------------
     
-    # 標準欄位定位 (用於非 PBB/PBDE 的項目，如 Pb/Cd)
-    max_scan_rows = min(5, len(table))
-    for r in range(max_scan_rows):
-        row = table[r]
-        for c_idx, cell in enumerate(row):
+    # 先嘗試找一下表頭，為了非 PBB 項目 (如 Pb)
+    item_idx = -1; result_idx = -1; mdl_idx = -1; limit_idx = -1
+    for i, row in enumerate(table[:5]):
+        for j, cell in enumerate(row):
             txt = clean_text(cell).lower()
-            if not txt: continue
-            if "test item" in txt or "測試項目" in txt: item_idx = c_idx
-            if "result" in txt or "結果" in txt: 
-                if result_idx == -1: result_idx = c_idx
-            if "mdl" in txt or "rl" in txt or "reporting limit" in txt: mdl_idx = c_idx
-            if "limit" in txt or "限值" in txt: limit_idx = c_idx
-            if "unit" in txt or "單位" in txt: unit_idx = c_idx
-
-    # 幾何夾擊定位 Result 欄位 (備援)
-    if result_idx == -1:
-        if unit_idx != -1 and mdl_idx != -1 and mdl_idx > unit_idx:
-            result_idx = mdl_idx - 1
-        elif mdl_idx != -1 and mdl_idx > 0:
-            result_idx = mdl_idx - 1
-    
+            if "test item" in txt: item_idx = j
+            if "result" in txt: 
+                if result_idx == -1: result_idx = j
+            if "mdl" in txt or "rl" in txt: mdl_idx = j
+            if "limit" in txt: limit_idx = j
+            
     if item_idx == -1: item_idx = 0
+    # 如果沒找到 Result，試著用 MDL 推算
+    if result_idx == -1 and mdl_idx != -1 and mdl_idx > 0:
+        result_idx = mdl_idx - 1
 
     for row in table:
         clean_row = [clean_text(cell) for cell in row]
         if not any(clean_row): continue
         
-        item_name = clean_row[item_idx]
-        item_lower = item_name.lower()
+        row_text = " ".join(clean_row).lower()
         
-        # --- PFAS 總結行 ---
-        if "all pfas substances" in item_lower:
-            pfas_res = ""
-            if result_idx != -1 and result_idx < len(clean_row) and clean_row[result_idx]:
-                pfas_res = clean_row[result_idx]
-            elif clean_row[-1]:
-                pfas_res = clean_row[-1]
-            if pfas_res:
-                process_row_data("PFAS", pfas_res, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True)
-            continue
-            
-        if "test item" in item_lower: continue
-
-        # --- v65.0 核心：PBB/PBDE 子項目彙整 ---
-        
-        # 判斷是否為子項目
-        is_pbb_sub = any(sub in item_lower for sub in pbb_subs)
-        is_pbde_sub = any(sub in item_lower for sub in pbde_subs)
+        # 1. 檢查是否為 PBB/PBDE 子項目 (這是 v66.0 的核心)
+        # 只要這行有 "monobrominated" 等字，就啟動行掃描，不管表頭！
+        is_pbb = any(k in row_text for k in INTERTEK_PBB_SUBS)
+        is_pbde = any(k in row_text for k in INTERTEK_PBDE_SUBS)
         
         target_group = None
-        if is_pbb_sub: target_group = "PBB"
-        elif is_pbde_sub: target_group = "PBDE"
+        if is_pbb: target_group = "PBB"
+        elif is_pbde: target_group = "PBDE"
         
         if target_group:
-            # 策略：抓取倒數第二欄 (Result)，這是 Intertek 最穩定的位置
-            # 即使表頭沒對齊，內容通常是對齊的
-            current_val = ""
+            # --- 行內雷達掃描 (Row Radar) ---
+            final_val = ""
             
-            # 嘗試 1: 倒數第二欄 (Intertek 標準: Result | MDL)
-            if len(clean_row) >= 2:
-                current_val = clean_row[-2]
+            # A. 優先找 ND (絕對安全)
+            for cell in clean_row:
+                if "nd" in cell.lower() or "n.d." in cell.lower():
+                    final_val = "N.D."
+                    break
             
-            # 嘗試 2: 如果倒數第二欄是空的，或者是單位 (ppm)，找有沒有 ND
-            if not current_val or "ppm" in current_val.lower() or "mg/kg" in current_val.lower():
+            # B. 沒 ND，找數字 (需過濾 Limit/MDL)
+            if not final_val:
                 for cell in clean_row:
-                    if "nd" in cell.lower() or "n.d." in cell.lower():
-                        current_val = "N.D."
-                        break
+                    # 跳過單位和方法
+                    if any(x in cell.lower() for x in ["mg/kg", "ppm", "iec", "method", "limit"]): continue
+                    try:
+                        num = float(cell)
+                        # 黑名單過濾 (1000=Limit, 100=Limit, 50=Limit/MDL, 5=MDL, 2=MDL)
+                        if num not in [1000.0, 100.0, 50.0, 25.0, 10.0, 5.0, 2.0, 0.1]:
+                            final_val = cell
+                            break
+                    except: pass
             
-            # 存入 Group Accumulator
-            if current_val:
-                # 這裡傳入 INTERTEK_MODE，會在 parse_value_priority 中過濾 1000/100/5/2
-                priority = parse_value_priority(current_val, target_key=target_group, is_table_result=True, mdl_value="INTERTEK_MODE")
+            if final_val:
+                priority = parse_value_priority(final_val, target_key=target_group, is_table_result=True, mdl_value="INTERTEK_ROW_SCAN")
                 if priority[0] > 0:
                     file_group_data[target_group].append(priority)
         
         else:
-            # --- 非 PBB/PBDE 的一般項目 (Pb, Cd 等) ---
-            # 這些項目通常有完整的表頭對應
-            result_cell = ""
-            if result_idx != -1 and result_idx < len(clean_row):
-                result_cell = clean_row[result_idx]
+            # --- 非 PBB/PBDE 的一般項目 (如 Pb, Cd) ---
+            # 這些項目通常格式比較乖，可以用欄位索引
+            # 但如果沒有表頭 (result_idx == -1)，我們也試著用行掃描找 ND
+            item_name = clean_row[item_idx]
             
-            # 備援：如果沒抓到，且這行有 ND，就抓 ND
-            if not result_cell:
+            # 跳過標題行
+            if "test item" in item_name.lower() or "result" in item_name.lower(): continue
+            
+            res_val = ""
+            # 有索引就用索引
+            if result_idx != -1 and result_idx < len(clean_row):
+                res_val = clean_row[result_idx]
+            
+            # 沒索引或空值，找 ND
+            if not res_val:
                 for cell in clean_row:
                     if "nd" in cell.lower():
-                        result_cell = "N.D."
+                        res_val = "N.D."
                         break
-
-            # Limit 防呆
+            
+            # 簡單防呆
             if limit_idx != -1 and limit_idx < len(clean_row):
-                 if result_cell == clean_row[limit_idx] and "nd" not in result_cell.lower():
-                     result_cell = ""
+                if res_val == clean_row[limit_idx] and "nd" not in res_val.lower():
+                    res_val = ""
 
-            process_row_data(item_name, result_cell, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value="INTERTEK_MODE")
+            process_row_data(item_name, res_val, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs, is_table=True, mdl_value="INTERTEK_ROW_SCAN")
 
 def parse_table_urhongxin(table, filename, data_pool, file_group_data, global_tracker, found_elements_in_table, debug_logs):
     item_idx = -1; result_idx = -1
@@ -380,8 +376,9 @@ def parse_table_cti(table, filename, data_pool, file_group_data, global_tracker,
         if "method" in item_name_lower or "remark" in item_name_lower or "note" in item_name_lower: continue
 
         is_group_header = False
-        for gh_kw in PBB_HEADER_KEYWORDS + PBDE_HEADER_KEYWORDS:
-             if gh_kw.lower() in item_name_lower:
+        for gh_kw in GROUP_KEYWORDS["PBB"] + GROUP_KEYWORDS["PBDE"]:
+             # CTI 仍使用大標題排除邏輯
+             if gh_kw.lower() in item_name_lower and "mono" not in item_name_lower:
                  is_group_header = True
                  break
         if is_group_header: continue
@@ -552,6 +549,8 @@ def process_row_data(item_name, result_cell, filename, data_pool, file_group_dat
                     global_tracker[target_key]["filename"] = filename
                 break
     
+    # 這裡的 GROUP_KEYWORDS 邏輯只用於非 Intertek 廠商 (SGS/CTI)
+    # Intertek 已經在 parse_table_intertek 裡面處理掉了
     for group_key, keywords in GROUP_KEYWORDS.items():
         if group_key not in data_pool: continue
         for kw in keywords:
@@ -786,9 +785,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v65.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v65.0 Intertek 子項目彙整版)")
-    st.error("🛠️ v65.0：Intertek 邏輯大改版：回歸 SGS/CTI 的「子項目彙整」模式。完全無視 PBB/PBDE 大標題（避開 Limit 表），只抓取子項目行，並採用「倒數第二欄 (Result)」規則。")
+    st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v66.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v66.0 Intertek 雙重過濾版)")
+    st.error("🛠️ v66.0：針對 Intertek 表格的雙重保險機制：1. 僅抓取 PBB/PBDE 子項目，直接物理避開 Limit 表格。 2. 採用行內雷達掃描 (Row Radar)，無視跨頁表頭缺失，並優先抓取 ND。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

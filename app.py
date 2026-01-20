@@ -30,6 +30,7 @@ INTERTEK_SUB_KEYWORDS = [
     "nonabrominated", "decabrominated", "monobb", "monobde"
 ]
 
+# 通用關鍵字 (含中英文)
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
     "Cd": ["Cadmium", "镉", "Cd", "카드뮴"], 
@@ -46,7 +47,6 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
-# 關鍵字擴充，確保抓到特殊的 "Polybromodiphenyl ether"
 GROUP_KEYWORDS = {
     "PBB": ["Polybrominated Biphenyls", "PBBs", "多溴聯苯", "多溴联苯", "Sum of PBBs", "多溴聯苯總和", "Polybromobiphenyl"],
     "PBDE": ["Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚", "多溴聯苯醚", "Sum of PBDEs", "多溴聯苯醚總和", "Polybromodiphenyl"]
@@ -60,13 +60,21 @@ def clean_text(text):
 
 def clean_value_final(val):
     if not val: return ""
+    # 移除特殊符號
     val = val.replace("▼", "").replace("▲", "").strip()
-    val = val.replace("mg/kg", "").replace("ppm", "").replace("%", "").strip()
+    # 移除單位
+    val = re.sub(r"(mg/kg|ppm|%|µg/cm²)", "", val, flags=re.IGNORECASE).strip()
+    
     val_lower = val.lower()
-    if "nd" in val_lower or "n.d." in val_lower or "not detected" in val_lower:
+    # 處理 ND
+    if "nd" in val_lower or "n.d." in val_lower or "not detected" in val_lower or "未檢出" in val_lower or "未检出" in val_lower:
         return "N.D."
-    if "negative" in val_lower:
+    if "negative" in val_lower or "陰性" in val_lower:
         return "Negative"
+    
+    # 移除 < >
+    val = re.sub(r"[<>]", "", val).strip()
+    
     return val
 
 def extract_date_from_text(text):
@@ -116,7 +124,7 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. INTERTEK 專用模組 (維持 v72.0 穩定版) ---
+# --- 3. INTERTEK 專用模組 (v72.0 邏輯) ---
 
 def scan_row_for_intertek(row_cells):
     candidates_num = []
@@ -234,87 +242,93 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
                                 "filename": filename
                             })
 
-# --- 4. SGS / CTI 專用模組 (v86.0 絕對直球版) ---
+# --- 4. SGS / CTI 專用模組 (v54.2 終極復刻: Sample ID 絕對錨定 + 中文支援) ---
 
-def parse_sgs_cti_direct(pdf, filename, company, data_pool, debug_logs):
+def parse_sgs_cti_v54_plus(pdf, filename, company, data_pool, debug_logs):
     """
-    v86.0: 絕對直球版
-    不再假設 PBB 行是標題。只要該行 Item 吻合且 Result 有值，直接抓！
-    這能解決 "S1000-2M.pdf" 這種結果寫在標題行的情況。
+    SGS/CTI v54.2 邏輯加強版：
+    1. Sample ID 絕對優先：抓取 No.1, A1, 004 等編號。
+    2. 移除嚴格的表頭特徵檢查：不再強制要有 Unit/MDL (因為中文報告可能寫中文)，改由 Sample ID 和 Result 關鍵字驅動。
+    3. 數值清洗：移除 "Pass", "Fail" 等干擾。
     """
+    
+    # 1. 提取 Sample ID (擴充支援格式)
     extracted_ids = []
     full_text = ""
     for p in pdf.pages: full_text += (p.extract_text() or "") + "\n"
     
+    # PFAS 檢查
     if any(k.lower() in full_text.lower() for k in PFAS_KEYWORDS):
          if not data_pool["PFAS"]:
              data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
 
     if company == "SGS":
-        matches = re.findall(r"Sample\s*No\.?\s*[:\.]?\s*([A-Z0-9\.]+)", full_text, re.IGNORECASE)
+        # 支援 Sample No. A1, No.1, Sample ID 等
+        matches = re.findall(r"Sample\s*(?:No\.?|ID)[\s:]*([A-Z0-9\.\-]+)", full_text, re.IGNORECASE)
         for m in matches: extracted_ids.append(m.strip())
         if "No.1" in full_text: extracted_ids.append("No.1")
+        if "A1" in full_text: extracted_ids.append("A1")
+
     elif company == "CTI":
         matches = re.findall(r"Result\s*(00\d)", full_text, re.IGNORECASE)
         for m in matches: extracted_ids.append(m.strip())
         if "004" in full_text: extracted_ids.append("004")
 
+    # 2. 表格處理
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
 
-            # --- A. 表格篩選 (避開 Summary) ---
-            header_rows = table[:5]
-            header_text = " ".join([str(c).lower() for row in header_rows for c in row if c])
-            
-            # 必須有 Unit 或 MDL
-            has_data_feature = "unit" in header_text or "mdl" in header_text or "loq" in header_text or "limit" in header_text or "單位" in header_text or "極限" in header_text
-            if not has_data_feature: continue 
-
-            if "equipment" in header_text or "measured" in header_text: continue
-            if "flow" in header_text and "chart" in header_text: continue
-
-            # --- B. 欄位定位 ---
+            # --- A. 欄位定位 (核心：找 Sample ID 或 Result) ---
             item_idx = -1
             result_idx = -1
+            
+            header_rows = table[:5]
             
             for r_idx, row in enumerate(header_rows):
                 for c_idx, cell in enumerate(row):
                     txt = clean_text(cell).lower()
-                    if "test item" in txt or "测试项目" in txt or "測試項目" in txt:
+                    
+                    # 定位項目欄 (支援中文)
+                    if "test item" in txt or "测试项目" in txt or "測試項目" in txt or "測 試 項 目" in txt:
                         item_idx = c_idx
                     
+                    # 定位結果欄 (Sample ID > Result > 結果)
+                    # 1. 優先匹配 Sample ID
                     for sid in extracted_ids:
                         if sid.lower() == txt or sid.lower() in txt:
                             result_idx = c_idx
                             break
                     if result_idx != -1: break
 
-                    if ("result" in txt or "结果" in txt) and "requirement" not in txt and "limit" not in txt:
+                    # 2. 其次匹配 Result / 結果 (但要避開 Requirement)
+                    if ("result" in txt or "结果" in txt or "結果" in txt) and "requirement" not in txt and "limit" not in txt:
                         result_idx = c_idx
 
                 if item_idx != -1 and result_idx != -1: break
             
+            # Fallback
             if result_idx == -1 and len(table[0]) > 1: result_idx = len(table[0]) - 1
             if item_idx == -1: item_idx = 0
 
-            # --- C. 內容抓取 ---
+            # --- B. 內容抓取 ---
             for r_idx in range(len(table)):
                 row = table[r_idx]
                 if len(row) <= result_idx: continue
                 
                 item_name = clean_text(row[item_idx])
-                if not item_name or "test item" in item_name.lower() or "result" in item_name.lower(): continue
+                # 跳過標題行
+                if "test item" in item_name.lower() or "result" in item_name.lower() or "項目" in item_name: continue
 
                 res_val = clean_text(row[result_idx])
+                if not res_val: continue
+                
+                # 過濾 "Pass" / "Fail" (這通常是 Summary 表的特徵)
+                if res_val.lower() in ["pass", "fail", "conclude", "符合"]: continue
                 
                 # 清洗數值
                 res_val_cleaned = clean_value_final(res_val)
-                
-                # 如果清洗後是空的，或者明顯是 Pass/Fail，跳過
-                if not res_val_cleaned: continue
-                if "pass" in res_val_cleaned.lower() or "fail" in res_val_cleaned.lower(): continue
 
                 # 匹配單項
                 for target, kws in SIMPLE_KEYWORDS.items():
@@ -327,17 +341,12 @@ def parse_sgs_cti_direct(pdf, filename, company, data_pool, debug_logs):
                         if num not in [2011, 2015, 62321]: 
                              data_pool[target].append({"priority": (prio, num, res_val_cleaned), "filename": filename})
 
-                # v86.0: 匹配群組 (PBB/PBDE) - 看到值就抓，不分標題或子項
+                # 匹配群組 (PBB/PBDE) - 直球對決
                 for group, kws in GROUP_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
-                        # 只要有值 (ND 或數字)，就認定它是結果
-                        prio = 1 if "nd" in res_val_cleaned.lower() else 3
-                        
-                        # 特殊防呆：如果這行寫的是 "Sum of PBBs" 且值是 "---"，那才跳過
-                        if "---" in res_val_cleaned or "not detected" in res_val_cleaned.lower() and len(res_val_cleaned) > 20:
-                             pass # 跳過無效描述
-                        else:
-                             data_pool[group].append({"priority": (prio, 0, res_val_cleaned), "filename": filename})
+                        # 只要有值就抓 (解決 SGS S1000-2M 問題)
+                        if res_val_cleaned and "---" not in res_val_cleaned:
+                             data_pool[group].append({"priority": (3, 0, res_val_cleaned), "filename": filename})
 
 # --- 5. Main Processing ---
 
@@ -362,7 +371,7 @@ def process_files(files):
                 if company == "INTERTEK":
                     process_intertek(pdf, filename, data_pool, debug_logs)
                 else:
-                    parse_sgs_cti_direct(pdf, filename, company, data_pool, debug_logs)
+                    parse_sgs_cti_v54_plus(pdf, filename, company, data_pool, debug_logs)
 
         except Exception as e:
             st.error(f"Error processing {filename}: {e}")
@@ -389,9 +398,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek Tool v86.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v86.0 直球對決版)")
-    st.info("💡 v86.0：SGS/CTI 邏輯全面「直球化」。取消 PBB/PBDE 標題行跳過機制，只要該行有關鍵字且 Result 欄有值 (ND 或數字)，立即抓取。這能解決舊版 SGS 報告結果寫在標題行的問題，同時不影響新版報告。Intertek 保持 v72.0 穩定版。")
+    st.set_page_config(page_title="SGS/CTI/Intertek Tool v87.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v87.0 Sample ID 錨定版)")
+    st.info("💡 v87.0：針對 SGS/CTI 回歸 v54.2 的 'Sample ID 錨定' 機制，移除過度嚴格的表格過濾，確保中文報告與特殊格式報告皆能正確讀取。Intertek 維持 v72 穩定版。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

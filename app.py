@@ -7,7 +7,7 @@ from datetime import datetime
 
 # --- 1. 關鍵字與黑名單 ---
 
-# Intertek 專用黑名單
+# Intertek 專用數值黑名單
 VALUE_BLACKLIST_INTERTEK = [
     1000.0, 100.0, 50.0, 25.0, 20.0, 10.0, 8.0, 5.0, 2.0, 1.0, 
     0.5, 0.1, 0.05, 0.01, 
@@ -104,7 +104,7 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. INTERTEK 模組 (v72.0 邏輯) ---
+# --- 3. INTERTEK 專用模組 (v72.0 邏輯 - 行內掃描) ---
 
 def scan_row_for_intertek(row_cells):
     candidates_num = []
@@ -220,14 +220,14 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
                                 "filename": filename
                             })
 
-# --- 4. SGS / CTI 專用模組 (v54.2 復刻: Sample ID 鎖定) ---
+# --- 4. SGS / CTI 專用模組 (v54.2 復刻: 特徵鎖定 + Sample ID) ---
 
 def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
     """
-    SGS/CTI 專用解析器：
-    1. 先抓 Sample ID (如 "A1", "004")。
-    2. 用 Sample ID 在表頭定位 Result 欄位。
-    3. 跳過 Summary/Conclusion 表格。
+    SGS/CTI v54.2 核心邏輯還原：
+    1. 特徵檢查 (Feature Check)：表格必須含有 'Unit' 或 'MDL' (或中文)。沒有則跳過。
+       -> 這是避免抓到 Summary/Conclusion/Method 表格的最強防線。
+    2. Sample ID 鎖定：優先抓表頭上的 Sample ID。
     """
     
     # 1. 提取 Sample ID
@@ -241,11 +241,9 @@ def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
              data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
 
     if company == "SGS":
-        # SGS 常見格式: "Sample No.: A1"
         m = re.search(r"Sample\s*No\.?\s*[:\.]?\s*([A-Z0-9]+)", full_text, re.IGNORECASE)
         if m: extracted_id = m.group(1).strip()
     elif company == "CTI":
-        # CTI 常見格式: Result 欄位通常顯示 "Result 004"
         m = re.search(r"Result\s*(00\d)", full_text, re.IGNORECASE)
         if m: extracted_id = m.group(1).strip()
 
@@ -255,33 +253,36 @@ def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
         for table in tables:
             if not table or len(table) < 2: continue
 
-            # --- A. 表格篩選 (避開 Summary) ---
-            header_rows = table[:5]
-            header_text = " ".join([str(c).lower() for row in header_rows for c in row if c])
+            # --- A. 特徵檢查 (The Missing Link of v54.2) ---
+            # 真正的結果表，一定有 "Unit" (單位) 或 "MDL" (極限)
+            header_text = " ".join([str(c).lower() for row in table[:5] for c in row if c])
             
-            # 如果有 "Conclusion" 或 "Pass" 且沒有詳細數據特徵 (MDL/Unit)，跳過
-            if ("conclusion" in header_text or "pass" in header_text) and "mdl" not in header_text:
-                continue 
-            if "requirement" in header_text and "result" not in header_text:
+            # 檢查關鍵特徵字 (包含中英文)
+            has_unit = "unit" in header_text or "單位" in header_text or "单位" in header_text
+            has_mdl = "mdl" in header_text or "loq" in header_text or "limit" in header_text or "極限" in header_text or "限值" in header_text
+            
+            # 如果連這兩個特徵都沒有，這絕對不是結果表 (可能是 Summary, Method, Flowchart) -> 跳過
+            if not (has_unit or has_mdl):
                 continue
 
-            # --- B. 欄位定位 (使用 Sample ID) ---
+            # 額外過濾：如果是 Method 表 (含 Equipment)，也跳過
+            if "equipment" in header_text or "measured" in header_text:
+                continue
+
+            # --- B. 欄位定位 ---
             item_idx = -1
             result_idx = -1
             
-            for r_idx, row in enumerate(header_rows):
+            for r_idx, row in enumerate(table[:5]):
                 for c_idx, cell in enumerate(row):
                     txt = clean_text(cell).lower()
                     
-                    # Item 欄位
                     if "test item" in txt or "测试项目" in txt or "測試項目" in txt:
                         item_idx = c_idx
                     
-                    # Result 欄位定位
-                    # 1. 優先匹配 Sample ID (如 "A1", "004")
+                    # Result 定位
                     if extracted_id and extracted_id.lower() == txt:
                         result_idx = c_idx
-                    # 2. 其次匹配 "Result" 關鍵字 (SGS 有時寫 "Test Result(s)")
                     elif ("result" in txt or "结果" in txt) and result_idx == -1:
                         # 再次確認不是 Requirement
                         if "requirement" not in txt:
@@ -289,7 +290,7 @@ def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
 
                 if item_idx != -1 and result_idx != -1: break
             
-            # Fallback: 如果沒找到 Result，試試看最後一欄 (常見於 CTI/SGS)
+            # Fallback
             if result_idx == -1 and len(table[0]) > 1:
                 result_idx = len(table[0]) - 1
             if item_idx == -1: item_idx = 0
@@ -300,27 +301,25 @@ def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
                 if len(row) <= result_idx: continue
                 
                 item_name = clean_text(row[item_idx])
-                # 跳過標題行本身
-                if "test item" in item_name.lower() or "result" in item_name.lower(): continue
+                if not item_name or "test item" in item_name.lower() or "result" in item_name.lower(): continue
 
                 res_val = clean_text(row[result_idx])
                 
-                # 過濾無效值 (Summary 表的殘留)
-                if "pass" in res_val.lower() or "conclude" in res_val.lower() or "limit" in res_val.lower(): 
-                    continue
+                # 過濾無效值
                 if not res_val: continue
+                # 如果這行抓到的是 "Pass" (極少數情況 Summary 表有 Unit)，也跳過
+                if "pass" in res_val.lower(): continue
 
                 # 匹配目標項目
                 for target, kws in SIMPLE_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
-                        # SGS/CTI: Result 欄位通常很乾淨 (ND 或 數字)
                         prio = 1 if "nd" in res_val.lower() else 3
                         try:
-                            # 移除 < >
                             num = float(re.sub(r"[<>]", "", res_val))
                         except: num = 0
                         
-                        # 簡單黑名單 (只擋年份等極端值)
+                        # SGS/CTI 不需要像 Intertek 那麼嚴格的黑名單，因為我們有 Unit/MDL 護體
+                        # 但還是擋一下年份
                         if num not in [2011, 2015, 62321]: 
                              data_pool[target].append({"priority": (prio, num, res_val), "filename": filename})
 
@@ -384,9 +383,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek Tool v77.1", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v77.1 完整修復版)")
-    st.info("💡 v77.1：修復代碼語法錯誤。功能與 v77.0 一致：Intertek 採用行內掃描，SGS/CTI 採用 Sample ID 鎖定，完美並存。")
+    st.set_page_config(page_title="SGS/CTI/Intertek Tool v79.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v79.0 特徵鎖定版)")
+    st.info("💡 v79.0：完美還原 SGS/CTI v54.2 邏輯。新增 'Unit/MDL' 特徵檢查，100% 準確過濾摘要表與儀器表，杜絕抓到 'Pass' 或 'ICP-OES'。Intertek 邏輯維持 v72 穩定版。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

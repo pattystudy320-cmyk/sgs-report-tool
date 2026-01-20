@@ -5,17 +5,9 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字與設定 ---
+# --- 1. 關鍵字與黑名單定義 ---
 
-# 輸出欄位
-OUTPUT_COLUMNS = [
-    "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
-    "DEHP", "BBP", "DBP", "DIBP", 
-    "PFOS", "PFAS", "F", "CL", "BR", "I", 
-    "日期", "檔案名稱"
-]
-
-# 數值黑名單 (Intertek 專用)
+# Intertek 專用黑名單 (SGS/CTI 不用這個)
 VALUE_BLACKLIST_INTERTEK = [
     1000.0, 100.0, 50.0, 25.0, 20.0, 10.0, 8.0, 5.0, 2.0, 1.0, 
     0.5, 0.1, 0.05, 0.01, 
@@ -23,17 +15,33 @@ VALUE_BLACKLIST_INTERTEK = [
     62321.0, 3052.0, 14582.0, 3540.0, 17681.0, 18219.0, 15968.0, 111.0
 ]
 
-# 關鍵字映射 (SGS/CTI 使用)
+OUTPUT_COLUMNS = [
+    "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
+    "DEHP", "BBP", "DBP", "DIBP", 
+    "PFOS", "PFAS", "F", "CL", "BR", "I", 
+    "日期", "檔案名稱"
+]
+
+PFAS_KEYWORDS = ["Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質"]
+
+# Intertek 專用子項目
+INTERTEK_SUB_KEYWORDS = [
+    "monobrominated", "dibrominated", "tribrominated", "tetrabrominated", 
+    "pentabrominated", "hexabrominated", "heptabrominated", "octabrominated", 
+    "nonabrominated", "decabrominated", "monobb", "monobde"
+]
+
+# SGS/CTI 通用關鍵字
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "铅", "Pb", "납"], 
     "Cd": ["Cadmium", "镉", "Cd", "카드뮴"], 
     "Hg": ["Mercury", "汞", "Hg", "수은"], 
     "Cr6+": ["Hexavalent Chromium", "六价铬", "六價鉻", "Cr(VI)", "Chromium VI", "Cr6+", "6가 크롬"],
-    "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate"],
-    "BBP": ["BBP", "Butyl benzyl phthalate"],
-    "DBP": ["DBP", "Dibutyl phthalate"],
-    "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    "PFOS": ["Perfluorooctane sulfonates", "PFOS"],
+    "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate", "邻苯二甲酸二(2-乙基己基)酯"],
+    "BBP": ["BBP", "Butyl benzyl phthalate", "邻苯二甲酸丁苄酯"],
+    "DBP": ["DBP", "Dibutyl phthalate", "邻苯二甲酸二丁酯"],
+    "DIBP": ["DIBP", "Diisobutyl phthalate", "邻苯二甲酸二异丁酯"],
+    "PFOS": ["Perfluorooctane sulfonates", "PFOS", "全氟辛烷磺酸"],
     "F": ["Fluorine", "氟", "(F)"],
     "CL": ["Chlorine", "氯", "(Cl)"],
     "BR": ["Bromine", "溴", "(Br)"],
@@ -44,15 +52,6 @@ GROUP_KEYWORDS = {
     "PBB": ["Polybrominated Biphenyls", "PBBs", "多溴联苯"],
     "PBDE": ["Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚"]
 }
-
-# Intertek 專用子項目關鍵字
-INTERTEK_SUB_KEYWORDS = [
-    "monobrominated", "dibrominated", "tribrominated", "tetrabrominated", 
-    "pentabrominated", "hexabrominated", "heptabrominated", "octabrominated", 
-    "nonabrominated", "decabrominated", "monobb", "monobde"
-]
-
-PFAS_KEYWORDS = ["Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質"]
 
 # --- 2. 輔助函式 ---
 
@@ -107,7 +106,7 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. INTERTEK 專用模組 (v72.0 邏輯) ---
+# --- 3. INTERTEK 專用模組 (v72.0 邏輯 - 行內掃描) ---
 
 def scan_row_for_intertek(row_cells):
     candidates_num = []
@@ -166,15 +165,6 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
         ("PBDE", INTERTEK_SUB_KEYWORDS + ["monobde"]),
     ]
 
-    full_text_content = ""
-    for page in pdf.pages:
-        text = page.extract_text() or ""
-        full_text_content += text
-    
-    if any(kw.lower() in full_text_content.lower() for kw in PFAS_KEYWORDS):
-        if not data_pool["PFAS"]:
-            data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
-
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
@@ -223,32 +213,23 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
                                 "filename": filename
                             })
 
-# --- 4. SGS / CTI 專用模組 (還原 v54.2 邏輯) ---
+# --- 4. SGS / CTI 專用模組 (v54.2 邏輯 - 欄位鎖定) ---
 
 def process_sgs_cti(pdf, filename, company, data_pool, debug_logs):
     """
     SGS/CTI 專用解析器：
     1. 嚴格鎖定 'Result' 欄位。
-    2. 跳過 Summary/Conclusion 表格。
-    3. 支援直欄/橫欄與 Sample ID。
+    2. 跳過 Summary/Conclusion 表格 (有 'Pass', 'Conclusion', 'Requirement' 字眼)。
+    3. 不進行全行掃描，避免抓到 Limit。
     """
-    # 1. PFAS 檢查
-    full_text = ""
-    for p in pdf.pages: full_text += (p.extract_text() or "")
-    if any(k.lower() in full_text.lower() for k in PFAS_KEYWORDS):
-         if not data_pool["PFAS"]:
-             data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
-
-    # 2. 表格處理
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
 
             # --- A. 表格篩選 (避開 Summary Table) ---
-            # 檢查前幾行是否包含 "Conclusion", "Pass", "Requirement" 且不含 "Unit" 或 "MDL"
             header_text = " ".join([str(c).lower() for row in table[:3] for c in row if c])
-            if "conclusion" in header_text or "pass" in header_text:
+            if "conclusion" in header_text or "pass" in header_text or "requirement" in header_text:
                 continue # 跳過摘要表
 
             # --- B. 欄位定位 ---
@@ -262,7 +243,7 @@ def process_sgs_cti(pdf, filename, company, data_pool, debug_logs):
                     if "test item" in txt or "测试项目" in txt or "測試項目" in txt:
                         item_idx = c_idx
                     # Result 必須精確，避免抓到 Requirement
-                    if ("result" in txt or "结果" in txt) and "requirement" not in txt:
+                    if ("result" in txt or "结果" in txt) and "requirement" not in txt and "limit" not in txt:
                         result_idx = c_idx
                 if item_idx != -1 and result_idx != -1: break
             
@@ -271,7 +252,7 @@ def process_sgs_cti(pdf, filename, company, data_pool, debug_logs):
                 result_idx = len(table[0]) - 1
             if item_idx == -1: item_idx = 0
 
-            # --- C. 內容抓取 ---
+            # --- C. 內容抓取 (只讀取 Result 欄) ---
             for r_idx in range(len(table)):
                 row = table[r_idx]
                 if len(row) <= result_idx: continue
@@ -282,20 +263,21 @@ def process_sgs_cti(pdf, filename, company, data_pool, debug_logs):
 
                 res_val = clean_text(row[result_idx])
                 
-                # 再次過濾無效值 (如 Pass, Conclude)
-                if "pass" in res_val.lower() or "conclude" in res_val.lower(): continue
-                if not res_val: continue
+                # 過濾無效值
+                if not res_val or "pass" in res_val.lower() or "conclude" in res_val.lower() or "limit" in res_val.lower(): 
+                    continue
 
                 # 匹配目標項目
                 for target, kws in SIMPLE_KEYWORDS.items():
-                    # 檢查項目名稱
                     if any(k.lower() in item_name.lower() for k in kws):
-                        # 儲存結果
                         prio = 1 if "nd" in res_val.lower() else 3
                         try:
                             num = float(re.sub(r"[<>]", "", res_val))
                         except: num = 0
-                        data_pool[target].append({"priority": (prio, num, res_val), "filename": filename})
+                        
+                        # 簡單黑名單 (避免抓到極端值)
+                        if num not in [2011, 2015, 62321]: 
+                             data_pool[target].append({"priority": (prio, num, res_val), "filename": filename})
 
                 # PBB/PBDE 群組處理 (SGS/CTI 通常有 Sum of PBBs 行)
                 for group, kws in GROUP_KEYWORDS.items():
@@ -314,22 +296,27 @@ def process_files(files):
         filename = file.name
         try:
             with pdfplumber.open(file) as pdf:
-                # 0. 判斷廠商
                 first_page_text = pdf.pages[0].extract_text() or ""
                 company = identify_company(first_page_text)
                 
-                # 1. 抓日期
                 for i in range(min(3, len(pdf.pages))):
                     d = extract_date_from_text(pdf.pages[i].extract_text())
                     if d: 
                         all_dates.append((d, filename))
                         break
                 
-                # 2. 分流 (嚴格隔離)
+                # PFAS 檢查 (全通用)
+                full_text_content = ""
+                for page in pdf.pages: full_text_content += (page.extract_text() or "")
+                if any(kw.lower() in full_text_content.lower() for kw in PFAS_KEYWORDS):
+                    if not data_pool["PFAS"]:
+                        data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
+
+                # 分流處理
                 if company == "INTERTEK":
                     process_intertek(pdf, filename, data_pool, debug_logs)
                 else:
-                    # SGS 和 CTI 走同一套復刻邏輯 (v54.2)
+                    # SGS 和 CTI 走同一套 v54.2 復刻邏輯
                     process_sgs_cti(pdf, filename, company, data_pool, debug_logs)
 
         except Exception as e:
@@ -357,9 +344,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek Tool v75.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v75.0 模組隔離版)")
-    st.info("💡 v75.0：完全隔離處理邏輯。Intertek 使用 v72 (行內掃描)；SGS/CTI 使用 v54 (欄位鎖定+摘要過濾)，確保互不干擾。")
+    st.set_page_config(page_title="SGS/CTI/Intertek Tool v76.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v76.0 徹底物理隔離版)")
+    st.info("💡 v76.0：Intertek (行內掃描) 與 SGS/CTI (欄位鎖定) 邏輯徹底分離。SGS/CTI 增加 'Pass/Conclusion' 表格跳過機制，防止抓到摘要。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

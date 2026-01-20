@@ -7,7 +7,7 @@ from datetime import datetime
 
 # --- 1. 關鍵字與黑名單 ---
 
-# Intertek 專用數值黑名單
+# Intertek 專用黑名單
 VALUE_BLACKLIST_INTERTEK = [
     1000.0, 100.0, 50.0, 25.0, 20.0, 10.0, 8.0, 5.0, 2.0, 1.0, 
     0.5, 0.1, 0.05, 0.01, 
@@ -15,10 +15,10 @@ VALUE_BLACKLIST_INTERTEK = [
     62321.0, 3052.0, 14582.0, 3540.0, 17681.0, 18219.0, 15968.0, 111.0
 ]
 
-# SGS/CTI 結果欄位可能的標題關鍵字 (包含中英文與縮寫)
-RESULT_HEADER_KEYWORDS = [
-    "result", "結果", "檢測結果", "测试结果", "test result", 
-    "no.", "sample", "a1", "a7", "001", "002", "003", "004"
+# 通用垃圾字串 (SGS/CTI 用)
+TEXT_BLACKLIST_GENERAL = [
+    "conclusion", "method", "unit", "mdl", "loq", "limit", 
+    "requirement", "icp-oes", "gc-ms", "uv-vis", "see results"
 ]
 
 OUTPUT_COLUMNS = [
@@ -44,7 +44,7 @@ SIMPLE_KEYWORDS = {
     "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate", "邻苯二甲酸二(2-乙基己基)酯"],
     "BBP": ["BBP", "Butyl benzyl phthalate", "邻苯二甲酸丁苄酯"],
     "DBP": ["DBP", "Dibutyl phthalate", "邻苯二甲酸二丁酯"],
-    "DIBP": ["DIBP", "Diisobutyl phthalate", "邻苯二甲酸二异丁酯"],
+    "DIBP": ["DIBP", "Diisobutyl phthalate", "邻苯二甲酸二異丁酯"],
     "PFOS": ["Perfluorooctane sulfonates", "PFOS", "全氟辛烷磺酸"],
     "F": ["Fluorine", "氟", "(F)"],
     "CL": ["Chlorine", "氯", "(Cl)"],
@@ -52,9 +52,10 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
+# 補強 SGS 的 PBB/PBDE 總和關鍵字
 GROUP_KEYWORDS = {
-    "PBB": ["Polybrominated Biphenyls", "PBBs", "多溴聯苯", "多溴联苯"],
-    "PBDE": ["Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚", "多溴聯苯醚"]
+    "PBB": ["Polybrominated Biphenyls", "PBBs", "多溴聯苯", "多溴联苯", "Sum of PBBs", "多溴聯苯總和"],
+    "PBDE": ["Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚", "多溴聯苯醚", "Sum of PBDEs", "多溴聯苯醚總和"]
 }
 
 # --- 2. 輔助函式 ---
@@ -62,6 +63,25 @@ GROUP_KEYWORDS = {
 def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
+
+def clean_value_final(val):
+    """
+    v82.0 新增：最終數值清洗
+    1. 移除 CTI 報告中的倒三角 ▼、正三角 ▲
+    2. 移除 < > 符號
+    3. 如果是 N.D. 則統一回傳 N.D.
+    """
+    if not val: return ""
+    # 移除特殊符號
+    val = val.replace("▼", "").replace("▲", "").strip()
+    
+    val_lower = val.lower()
+    if "nd" in val_lower or "n.d." in val_lower or "not detected" in val_lower:
+        return "N.D."
+    if "negative" in val_lower:
+        return "Negative"
+        
+    return val
 
 def extract_date_from_text(text):
     text = clean_text(text)
@@ -110,7 +130,7 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. INTERTEK 專用模組 (v72.0 邏輯 - 行內掃描 + 避開項目名稱) ---
+# --- 3. INTERTEK 專用模組 (v72.0 邏輯) ---
 
 def scan_row_for_intertek(row_cells):
     candidates_num = []
@@ -212,32 +232,27 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
                         cells_to_scan = clean_row[hit_cell_index+1:]
                         val = scan_row_for_intertek(cells_to_scan)
                         if val:
-                            if "negative" in val.lower(): priority_score = 4
-                            elif "nd" in val.lower(): priority_score = 1
+                            val_cleaned = clean_value_final(val) # v82.0 清洗
+                            
+                            if "negative" in val_cleaned.lower(): priority_score = 4
+                            elif "nd" in val_cleaned.lower(): priority_score = 1
                             else: priority_score = 5
                             
                             try:
-                                real_val_num = float(re.sub(r"[<>]", "", val))
+                                real_val_num = float(re.sub(r"[<>]", "", val_cleaned))
                             except:
                                 real_val_num = 0
 
                             data_pool[target].append({
-                                "priority": (priority_score, real_val_num, val),
+                                "priority": (priority_score, real_val_num, val_cleaned),
                                 "filename": filename
                             })
 
-# --- 4. SGS / CTI 專用模組 (v54.2 升級版: 多重結果欄位識別) ---
+# --- 4. SGS / CTI 專用模組 (v54.2 復刻 + 特徵鎖定) ---
 
 def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
-    """
-    SGS/CTI 穩健解析器：
-    1. 嘗試抓取 Sample ID。
-    2. 掃描表頭，尋找任何可能的結果欄位標識 (Result, 結果, 004, A1 等)。
-    3. 排除 Summary/Method 表格。
-    """
-    
     # 1. 提取 Sample ID
-    extracted_id = None
+    extracted_ids = []
     full_text = ""
     for p in pdf.pages: full_text += (p.extract_text() or "") + "\n"
     
@@ -247,11 +262,14 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
              data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
 
     if company == "SGS":
-        m = re.search(r"Sample\s*No\.?\s*[:\.]?\s*([A-Z0-9]+)", full_text, re.IGNORECASE)
-        if m: extracted_id = m.group(1).strip()
+        matches = re.findall(r"Sample\s*No\.?\s*[:\.]?\s*([A-Z0-9\.]+)", full_text, re.IGNORECASE)
+        for m in matches: extracted_ids.append(m.strip())
+        if "No.1" in full_text: extracted_ids.append("No.1")
+
     elif company == "CTI":
-        m = re.search(r"Result\s*(00\d)", full_text, re.IGNORECASE)
-        if m: extracted_id = m.group(1).strip()
+        matches = re.findall(r"Result\s*(00\d)", full_text, re.IGNORECASE)
+        for m in matches: extracted_ids.append(m.strip())
+        if "004" in full_text: extracted_ids.append("004")
 
     # 2. 表格處理
     for page in pdf.pages:
@@ -259,21 +277,17 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
         for table in tables:
             if not table or len(table) < 2: continue
 
-            # --- A. 表格篩選 (避開 Summary Table) ---
-            # 檢查表頭是否有 Unit 或 MDL，如果沒有，很可能是 Summary
+            # --- A. 表格篩選 (避開 Summary) ---
             header_rows = table[:5]
             header_text = " ".join([str(c).lower() for row in header_rows for c in row if c])
             
-            # 特徵過濾：必須包含 Unit 或 MDL/Limit 才是詳細數據表
             has_data_feature = "unit" in header_text or "mdl" in header_text or "loq" in header_text or "limit" in header_text or "單位" in header_text or "極限" in header_text
-            
-            if not has_data_feature:
-                continue # 跳過 Summary, Method, Flowchart
+            if not has_data_feature: continue 
 
-            if "equipment" in header_text or "measured" in header_text:
-                continue
+            if "equipment" in header_text or "measured" in header_text: continue
+            if "flow" in header_text and "chart" in header_text: continue
 
-            # --- B. 欄位定位 (多重關鍵字策略) ---
+            # --- B. 欄位定位 ---
             item_idx = -1
             result_idx = -1
             
@@ -284,30 +298,19 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
                     if "test item" in txt or "测试项目" in txt or "測試項目" in txt:
                         item_idx = c_idx
                     
-                    # Result 欄位定位：多重條件
-                    is_result_col = False
-                    
-                    # 1. 匹配 Sample ID
-                    if extracted_id and extracted_id.lower() in txt:
-                        is_result_col = True
-                    
-                    # 2. 匹配通用結果關鍵字 (但要避開 Requirement)
-                    if not is_result_col:
-                        for kw in RESULT_HEADER_KEYWORDS:
-                            if kw in txt and "requirement" not in txt and "limit" not in txt:
-                                is_result_col = True
-                                break
-                    
-                    if is_result_col:
-                         # 如果已經找到一個結果欄，保留優先級最高的 (例如有 ID 的優先)
-                         if result_idx == -1:
-                             result_idx = c_idx
-                         elif extracted_id and extracted_id.lower() in txt:
-                             result_idx = c_idx # ID 匹配優先覆蓋
+                    # 優先 Sample ID
+                    for sid in extracted_ids:
+                        if sid.lower() == txt or sid.lower() in txt:
+                            result_idx = c_idx
+                            break
+                    if result_idx != -1: break
+
+                    # 其次 Result
+                    if ("result" in txt or "结果" in txt) and "requirement" not in txt and "limit" not in txt:
+                        result_idx = c_idx
 
                 if item_idx != -1 and result_idx != -1: break
             
-            # Fallback
             if result_idx == -1 and len(table[0]) > 1:
                 result_idx = len(table[0]) - 1
             if item_idx == -1: item_idx = 0
@@ -321,26 +324,27 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
                 if not item_name or "test item" in item_name.lower() or "result" in item_name.lower(): continue
 
                 res_val = clean_text(row[result_idx])
-                
-                # 過濾無效值
                 if not res_val: continue
-                if "pass" in res_val.lower() or "fail" in res_val.lower(): continue
+                if "pass" in res_val.lower() or "fail" in res_val.lower(): continue # 摘要表殘留
 
-                # 匹配目標項目
+                res_val_cleaned = clean_value_final(res_val) # v82.0 符號清洗
+
+                # 匹配單項
                 for target, kws in SIMPLE_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
-                        prio = 1 if "nd" in res_val.lower() else 3
+                        prio = 1 if "nd" in res_val_cleaned.lower() else 3
                         try:
-                            num = float(re.sub(r"[<>]", "", res_val))
+                            num = float(re.sub(r"[<>]", "", res_val_cleaned))
                         except: num = 0
                         
                         if num not in [2011, 2015, 62321]: 
-                             data_pool[target].append({"priority": (prio, num, res_val), "filename": filename})
+                             data_pool[target].append({"priority": (prio, num, res_val_cleaned), "filename": filename})
 
-                # Group Logic
+                # 匹配群組 (PBB/PBDE Sum) - v82.0 重點修復
                 for group, kws in GROUP_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
-                        if "nd" in res_val.lower():
+                        # SGS 的 Sum 行通常有值 (ND)
+                        if "nd" in res_val_cleaned.lower():
                              data_pool[group].append({"priority": (1, 0, "N.D."), "filename": filename})
 
 # --- 5. Main Processing ---
@@ -354,22 +358,18 @@ def process_files(files):
         filename = file.name
         try:
             with pdfplumber.open(file) as pdf:
-                # 判斷廠商
                 first_page_text = pdf.pages[0].extract_text() or ""
                 company = identify_company(first_page_text)
                 
-                # 抓日期
                 for i in range(min(3, len(pdf.pages))):
                     d = extract_date_from_text(pdf.pages[i].extract_text())
                     if d: 
                         all_dates.append((d, filename))
                         break
                 
-                # 分流
                 if company == "INTERTEK":
                     process_intertek(pdf, filename, data_pool, debug_logs)
                 else:
-                    # SGS, CTI, URHONGXIN 都走穩健版
                     parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs)
 
         except Exception as e:
@@ -397,9 +397,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek Tool v81.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v81.0 關鍵字全覆蓋版)")
-    st.info("💡 v81.0：徹底解決 CTI/SGS 欄位名稱多變問題。SGS/CTI 解析器新增 '結果/Result/004/A1' 等多重關鍵字網，並強制檢查 'Unit/MDL' 以排除 Summary 表。Intertek 保持 v72.0 穩定版。")
+    st.set_page_config(page_title="SGS/CTI/Intertek Tool v82.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v82.0 符號清洗版)")
+    st.info("💡 v82.0：1. 修正 CTI 報告 'N.D. ▼' 顯示問題 (自動移除倒三角)。 2. 修復 SGS PBB/PBDE 總和抓取問題 (加入 'Sum of' 關鍵字)。 3. 邏輯架構維持：Intertek (v72) / SGS & CTI (v54.2 + 符號清洗)。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

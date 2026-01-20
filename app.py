@@ -15,11 +15,12 @@ VALUE_BLACKLIST_INTERTEK = [
     62321.0, 3052.0, 14582.0, 3540.0, 17681.0, 18219.0, 15968.0, 111.0
 ]
 
-# SGS/CTI 抓取內容「垃圾過濾名單」 (抓到這些字串視為無效)
-INVALID_VALUES_SGS = [
+# SGS/CTI 垃圾內容過濾名單
+INVALID_CONTENT_SGS = [
     "icp-oes", "gc-ms", "uv-vis", "see results", "pass", "fail", 
     "conforms", "detected", "not detected", "method", "reference",
-    "analyzed", "equipment", "testing", "flow", "chart"
+    "analyzed", "equipment", "testing", "flow", "chart", "iec", "epa",
+    "iso", "analysis", "performed", "note", "remark", "negative", "positive"
 ]
 
 OUTPUT_COLUMNS = [
@@ -29,6 +30,7 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
+# PFAS 只要偵測到這些字，就直接 REPORT
 PFAS_KEYWORDS = ["Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質"]
 
 INTERTEK_SUB_KEYWORDS = [
@@ -64,27 +66,39 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
-def clean_value_final(val):
-    if not val: return ""
-    # 1. 移除特殊符號
-    val = val.replace("▼", "").replace("▲", "").strip()
-    # 2. 移除單位 (確保只剩數值或狀態)
-    val = re.sub(r"(mg/kg|ppm|%|µg/cm²)", "", val, flags=re.IGNORECASE).strip()
-    
+def is_valid_result(val):
+    """
+    驗證數值是否有效，過濾掉儀器名稱或無效文字
+    """
+    if not val: return False
     val_lower = val.lower()
     
-    # 3. 內容審查 (v89.0 新增：過濾垃圾字串)
-    # 如果內容包含 "icp-oes" 或 "see results" 等，直接回傳空值，表示抓錯了
-    for bad_word in INVALID_VALUES_SGS:
-        if bad_word in val_lower:
-            return ""
-
-    if "nd" in val_lower or "n.d." in val_lower or "not detected" in val_lower or "未檢出" in val_lower or "未检出" in val_lower:
-        return "N.D."
-    if "negative" in val_lower or "陰性" in val_lower:
-        return "Negative"
+    if any(bad in val_lower for bad in INVALID_CONTENT_SGS):
+        return False
+        
+    if "nd" in val_lower or "n.d." in val_lower:
+        return True
     
-    # 4. 移除括號
+    clean = re.sub(r"[<>\s]", "", val_lower)
+    try:
+        float(clean)
+        return True
+    except:
+        return False
+
+def clean_value_final(val):
+    if not val: return ""
+    
+    if not is_valid_result(val):
+        return "" 
+        
+    val = val.replace("▼", "").replace("▲", "").strip()
+    val = re.sub(r"(mg/kg|ppm|%|µg/cm²)", "", val, flags=re.IGNORECASE).strip()
+    val_lower = val.lower()
+    
+    if "nd" in val_lower or "n.d." in val_lower or "not detected" in val_lower:
+        return "N.D."
+    
     val = re.sub(r"[<>]", "", val).strip()
     return val
 
@@ -135,7 +149,7 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. INTERTEK 模組 (維持 v72.0 穩定版) ---
+# --- 3. INTERTEK 模組 (維持 v72.0) ---
 
 def scan_row_for_intertek(row_cells):
     candidates_num = []
@@ -146,18 +160,9 @@ def scan_row_for_intertek(row_cells):
         txt = clean_text(cell)
         if not txt: continue
         txt_lower = txt.lower()
-
-        if any(x in txt_lower for x in ["mg/kg", "ppm", "µg", "%", "iec", "epa", "iso", "method", "reference", "limit", "mdl", "loq"]):
-            continue
-
-        if "negative" in txt_lower:
-            has_negative = True
-            continue
-
-        if "nd" in txt_lower or "n.d." in txt_lower or "not detected" in txt_lower:
-            has_nd = True
-            continue
-
+        if any(x in txt_lower for x in ["mg/kg", "ppm", "µg", "%", "iec", "epa", "iso", "method", "reference", "limit", "mdl", "loq"]): continue
+        if "negative" in txt_lower: has_negative = True; continue
+        if "nd" in txt_lower or "n.d." in txt_lower or "not detected" in txt_lower: has_nd = True; continue
         match_num = re.search(r"^(\d+(\.\d+)?)", txt)
         if match_num:
             try:
@@ -170,7 +175,6 @@ def scan_row_for_intertek(row_cells):
     if candidates_num:
         best_match = sorted(candidates_num, key=lambda x: x[1], reverse=True)[0]
         return best_match[0]
-    
     if has_negative: return "Negative"
     if has_nd: return "N.D."
     return None
@@ -195,16 +199,10 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
     ]
 
     for page in pdf.pages:
-        text = page.extract_text() or ""
-        if any(kw.lower() in text.lower() for kw in PFAS_KEYWORDS):
-            if not data_pool["PFAS"]:
-                data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
-
         tables = page.extract_tables()
         for table in tables:
             header_rows = table[:3]
             header_str = " ".join([str(c) for row in header_rows for c in row if c]).lower()
-            
             if "restricted substances" in header_str and "limits" in header_str: continue
             if "sample description" in header_str or "product name" in header_str or "item no" in header_str: continue
             if "cas no" in header_str and "name" in header_str: continue
@@ -212,105 +210,87 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
             for row in table:
                 clean_row = [clean_text(cell) for cell in row if cell]
                 if not clean_row: continue
-                
                 for target, keywords in TARGET_MAP:
                     hit = False
                     hit_cell_index = -1
-                    
                     for idx, cell in enumerate(clean_row):
                         cell_lower = cell.lower()
                         for kw in keywords:
                             if kw in cell_lower:
-                                if target in ["Pb", "Cd", "Hg"] and ("poly" in cell_lower or "pbb" in cell_lower):
-                                    continue
-                                hit = True
-                                hit_cell_index = idx
-                                break
+                                if target in ["Pb", "Cd", "Hg"] and ("poly" in cell_lower or "pbb" in cell_lower): continue
+                                hit = True; hit_cell_index = idx; break
                         if hit: break
-                    
                     if hit:
                         cells_to_scan = clean_row[hit_cell_index+1:]
                         val = scan_row_for_intertek(cells_to_scan)
                         if val:
                             val_cleaned = clean_value_final(val) 
-                            
                             if "negative" in val_cleaned.lower(): priority_score = 4
                             elif "nd" in val_cleaned.lower(): priority_score = 1
                             else: priority_score = 5
-                            
-                            try:
-                                real_val_num = float(re.sub(r"[<>]", "", val_cleaned))
-                            except:
-                                real_val_num = 0
+                            try: real_val_num = float(re.sub(r"[<>]", "", val_cleaned))
+                            except: real_val_num = 0
+                            data_pool[target].append({"priority": (priority_score, real_val_num, val_cleaned), "filename": filename})
 
-                            data_pool[target].append({
-                                "priority": (priority_score, real_val_num, val_cleaned),
-                                "filename": filename
-                            })
+# --- 4. SGS / CTI 專用模組 (v91.0: 內容過濾器 + Sample ID + PFAS文字直讀) ---
 
-# --- 4. SGS / CTI 專用模組 (v89.0: 內容審查 + 嚴格表格過濾) ---
-
-def parse_sgs_cti_strict(pdf, filename, company, data_pool, debug_logs):
-    # 1. 提取 Sample ID (只讀第一頁)
+def parse_sgs_cti_v91(pdf, filename, company, data_pool, debug_logs):
+    # 1. 全文掃描：抓取 Sample ID 和 PFAS 關鍵字
     extracted_ids = []
-    first_page_text = (pdf.pages[0].extract_text() or "") + "\n"
+    full_text_content = ""
     
-    if company == "SGS":
-        matches = re.findall(r"Sample\s*(?:No\.?|ID)[\s:]*([A-Z0-9\.\-]+)", first_page_text, re.IGNORECASE)
-        for m in matches: extracted_ids.append(m.strip())
-        if "No.1" in first_page_text: extracted_ids.append("No.1")
-        if "A1" in first_page_text: extracted_ids.append("A1")
-
-    elif company == "CTI":
-        matches = re.findall(r"Result\s*(00\d)", first_page_text, re.IGNORECASE)
-        for m in matches: extracted_ids.append(m.strip())
-        if "004" in first_page_text: extracted_ids.append("004")
-
-    # 2. 表格處理
-    for page in pdf.pages:
-        # PFAS Check
+    # 為了加速，先讀前3頁抓 ID 和 PFAS，如果沒抓到 PFAS 再看後面
+    for i, page in enumerate(pdf.pages):
         text = page.extract_text() or ""
-        if any(k.lower() in text.lower() for k in PFAS_KEYWORDS):
-             if not data_pool["PFAS"]:
-                 data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
+        full_text_content += text + "\n"
+        if i < 3: # ID 通常在前幾頁
+            if company == "SGS":
+                matches = re.findall(r"Sample\s*(?:No\.?|ID)[\s:]*([A-Z0-9\.\-]+)", text, re.IGNORECASE)
+                for m in matches: extracted_ids.append(m.strip())
+                if "No.1" in text: extracted_ids.append("No.1")
+                if "A1" in text: extracted_ids.append("A1")
+            elif company == "CTI":
+                matches = re.findall(r"Result\s*(00\d)", text, re.IGNORECASE)
+                for m in matches: extracted_ids.append(m.strip())
+                if "004" in text: extracted_ids.append("004")
 
+    # 2. PFAS 判定：只要全文有出現關鍵字，就標記 (不依賴表格)
+    if any(k.lower() in full_text_content.lower() for k in PFAS_KEYWORDS):
+         if not data_pool["PFAS"]:
+             data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
+
+    # 3. 表格處理 (針對 Pb, Cd, Hg 等數值)
+    for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
 
-            # --- A. 表格篩選 (Table Filter) ---
-            # 這是防止抓到 Method 表的關鍵
+            # --- A. 表格篩選 ---
             header_rows = table[:5]
             header_text = " ".join([str(c).lower() for row in header_rows for c in row if c])
             
-            # 如果表頭有 Equipment / Measured -> 這是儀器表，跳過
+            has_data = "unit" in header_text or "mdl" in header_text or "loq" in header_text or "limit" in header_text or "單位" in header_text or "mg/kg" in header_text
+            if not has_data: continue
             if "equipment" in header_text or "measured" in header_text: continue
             if "flow" in header_text and "chart" in header_text: continue
 
-            # 結果表必須有 Unit 或 MDL 或 Limit (這點對 SGS 很有效)
-            has_data_indicator = "unit" in header_text or "mdl" in header_text or "loq" in header_text or "limit" in header_text or "單位" in header_text or "mg/kg" in header_text
-            if not has_data_indicator: continue
-
-            # --- B. 欄位定位 (Column Mapping) ---
+            # --- B. 欄位定位 ---
             item_idx = -1
             result_idx = -1
             
             for r_idx, row in enumerate(header_rows):
                 for c_idx, cell in enumerate(row):
                     txt = clean_text(cell).lower()
-                    
-                    if "test item" in txt or "测试项目" in txt or "測試項目" in txt or "測 試 項 目" in txt:
+                    if "test item" in txt or "测试项目" in txt or "測試項目" in txt:
                         item_idx = c_idx
-                    
-                    # 優先找 Sample ID
+                    # 優先 Sample ID
                     for sid in extracted_ids:
                         if sid.lower() == txt or sid.lower() in txt:
                             result_idx = c_idx
                             break
                     if result_idx != -1: break
-                    
-                    # 其次找 Result (需避開 Requirement)
-                    if ("result" in txt or "结果" in txt or "結果" in txt) and "requirement" not in txt:
+                    # 其次 Result
+                    if ("result" in txt or "结果" in txt) and "requirement" not in txt:
                         result_idx = c_idx
 
                 if item_idx != -1 and result_idx != -1: break
@@ -318,30 +298,28 @@ def parse_sgs_cti_strict(pdf, filename, company, data_pool, debug_logs):
             if result_idx == -1 and len(table[0]) > 1: result_idx = len(table[0]) - 1
             if item_idx == -1: item_idx = 0
 
-            # --- C. 內容抓取 (Data Extraction & Validation) ---
+            # --- C. 內容抓取 ---
             for r_idx in range(len(table)):
                 row = table[r_idx]
                 if len(row) <= result_idx: continue
                 
                 item_name = clean_text(row[item_idx])
-                # 跳過標題行
-                if "test item" in item_name.lower() or "result" in item_name.lower() or "項目" in item_name: continue
+                if not item_name or "test item" in item_name.lower() or "result" in item_name.lower(): continue
 
                 res_val = clean_text(row[result_idx])
-                if not res_val: continue
                 
-                # 清洗與驗證 (核心！)
+                # 核心驗證：垃圾內容過濾 (ICP-OES, Pass 等)
+                if not is_valid_result(res_val): continue
+                
                 res_val_cleaned = clean_value_final(res_val)
-                if not res_val_cleaned: continue # 如果清洗後變空 (例如是 ICP-OES)，就跳過
+                if not res_val_cleaned: continue
 
                 # 匹配單項
                 for target, kws in SIMPLE_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
                         prio = 1 if "nd" in res_val_cleaned.lower() else 3
-                        try:
-                            num = float(re.sub(r"[<>]", "", res_val_cleaned))
+                        try: num = float(re.sub(r"[<>]", "", res_val_cleaned))
                         except: num = 0
-                        
                         if num not in [2011, 2015, 62321]: 
                              data_pool[target].append({"priority": (prio, num, res_val_cleaned), "filename": filename})
 
@@ -350,6 +328,8 @@ def parse_sgs_cti_strict(pdf, filename, company, data_pool, debug_logs):
                     if any(k.lower() in item_name.lower() for k in kws):
                         if res_val_cleaned and "---" not in res_val_cleaned:
                              data_pool[group].append({"priority": (3, 0, res_val_cleaned), "filename": filename})
+                        elif "nd" in res_val_cleaned.lower():
+                             data_pool[group].append({"priority": (1, 0, "N.D."), "filename": filename})
 
 # --- 5. Main Processing ---
 
@@ -362,11 +342,9 @@ def process_files(files):
         filename = file.name
         try:
             with pdfplumber.open(file) as pdf:
-                # 只讀首頁以加速
                 first_page_text = pdf.pages[0].extract_text() or ""
                 company = identify_company(first_page_text)
                 
-                # 抓日期
                 for i in range(min(3, len(pdf.pages))):
                     d = extract_date_from_text(pdf.pages[i].extract_text())
                     if d: 
@@ -375,8 +353,13 @@ def process_files(files):
                 
                 if company == "INTERTEK":
                     process_intertek(pdf, filename, data_pool, debug_logs)
+                    # Intertek 的 PFAS 也改為直讀
+                    full_text = ""
+                    for p in pdf.pages: full_text += (p.extract_text() or "")
+                    if any(kw.lower() in full_text.lower() for kw in PFAS_KEYWORDS):
+                        if not data_pool["PFAS"]: data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
                 else:
-                    parse_sgs_cti_strict(pdf, filename, company, data_pool, debug_logs)
+                    parse_sgs_cti_v91(pdf, filename, company, data_pool, debug_logs)
 
         except Exception as e:
             st.error(f"Error processing {filename}: {e}")
@@ -403,9 +386,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek Tool v89.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v89.0 SGS 內容淨化版)")
-    st.info("💡 v89.0：針對 SGS 報告中出現的非數值內容 ('ICP-OES', 'See Results') 進行嚴格過濾。程式現在會檢查抓取到的值是否有效，無效則丟棄，確保只輸出 ND 或數字。Intertek 邏輯保持不變。")
+    st.set_page_config(page_title="SGS/CTI/Intertek Tool v91.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v91.0 PFAS 直讀回歸版)")
+    st.info("💡 v91.0：1. PFAS 回歸 '關鍵字直讀' 模式，只要報告內有 PFAS 相關文字即顯示 REPORT (不查表格)。 2. SGS/CTI 數值過濾器升級，強制排除 'ICP-OES', 'See Results' 等無效內容。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

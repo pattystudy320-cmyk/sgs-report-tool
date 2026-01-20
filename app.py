@@ -5,9 +5,9 @@ import io
 import re
 from datetime import datetime
 
-# --- 1. 關鍵字與黑名單 ---
+# --- 1. 關鍵字與設定 ---
 
-# Intertek 專用數值黑名單
+# Intertek 專用黑名單
 VALUE_BLACKLIST_INTERTEK = [
     1000.0, 100.0, 50.0, 25.0, 20.0, 10.0, 8.0, 5.0, 2.0, 1.0, 
     0.5, 0.1, 0.05, 0.01, 
@@ -46,18 +46,9 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "(I)"]
 }
 
-# v83.0: 補強 SGS 特有拼法 "Polybromobiphenyl"
 GROUP_KEYWORDS = {
-    "PBB": [
-        "Polybrominated Biphenyls", "PBBs", "多溴聯苯", "多溴联苯", 
-        "Sum of PBBs", "多溴聯苯總和", 
-        "Polybromobiphenyl"  # SGS 特有寫法
-    ],
-    "PBDE": [
-        "Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚", "多溴聯苯醚", 
-        "Sum of PBDEs", "多溴聯苯醚總和",
-        "Polybromodiphenyl" # SGS 特有寫法
-    ]
+    "PBB": ["Polybrominated Biphenyls", "PBBs", "多溴聯苯", "多溴联苯", "Sum of PBBs", "多溴聯苯總和", "Polybromobiphenyl"],
+    "PBDE": ["Polybrominated Diphenyl Ethers", "PBDEs", "多溴二苯醚", "多溴聯苯醚", "Sum of PBDEs", "多溴聯苯醚總和", "Polybromodiphenyl"]
 }
 
 # --- 2. 輔助函式 ---
@@ -67,21 +58,14 @@ def clean_text(text):
     return str(text).replace('\n', ' ').strip()
 
 def clean_value_final(val):
-    """
-    v83.0 更新：移除單位，確保只回傳純數字或狀態
-    """
     if not val: return ""
-    # 1. 移除特殊符號
     val = val.replace("▼", "").replace("▲", "").strip()
-    # 2. 移除單位 (v83.0 新增)
     val = val.replace("mg/kg", "").replace("ppm", "").replace("%", "").strip()
-    
     val_lower = val.lower()
     if "nd" in val_lower or "n.d." in val_lower or "not detected" in val_lower:
         return "N.D."
     if "negative" in val_lower:
         return "Negative"
-        
     return val
 
 def extract_date_from_text(text):
@@ -131,7 +115,7 @@ def identify_company(text):
     if "tuv" in txt: return "TUV"
     return "OTHERS"
 
-# --- 3. INTERTEK 專用模組 (維持 v72.0) ---
+# --- 3. INTERTEK 模組 (維持 v72.0) ---
 
 def scan_row_for_intertek(row_cells):
     candidates_num = []
@@ -233,7 +217,7 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
                         cells_to_scan = clean_row[hit_cell_index+1:]
                         val = scan_row_for_intertek(cells_to_scan)
                         if val:
-                            val_cleaned = clean_value_final(val) # 使用 v83.0 清洗
+                            val_cleaned = clean_value_final(val) 
                             
                             if "negative" in val_cleaned.lower(): priority_score = 4
                             elif "nd" in val_cleaned.lower(): priority_score = 1
@@ -249,15 +233,19 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
                                 "filename": filename
                             })
 
-# --- 4. SGS / CTI 專用模組 (v54.2 復刻 + 特徵鎖定 + 單位清洗) ---
+# --- 4. SGS / CTI 專用模組 (回歸 v54.2 原始邏輯) ---
 
-def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
-    # 1. 提取 Sample ID
+def parse_sgs_cti_original(pdf, filename, company, data_pool, debug_logs):
+    """
+    SGS/CTI 回歸原始 v54.2：
+    1. Sample ID 鎖定 (最重要)。
+    2. 找到行就抓值，不做過多的 '子項目/標題行' 區分。
+    3. 只需避開 Summary Table。
+    """
     extracted_ids = []
     full_text = ""
     for p in pdf.pages: full_text += (p.extract_text() or "") + "\n"
     
-    # PFAS 檢查
     if any(k.lower() in full_text.lower() for k in PFAS_KEYWORDS):
          if not data_pool["PFAS"]:
              data_pool["PFAS"].append({"priority": (5, 0, "REPORT"), "filename": filename})
@@ -266,13 +254,11 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
         matches = re.findall(r"Sample\s*No\.?\s*[:\.]?\s*([A-Z0-9\.]+)", full_text, re.IGNORECASE)
         for m in matches: extracted_ids.append(m.strip())
         if "No.1" in full_text: extracted_ids.append("No.1")
-
     elif company == "CTI":
         matches = re.findall(r"Result\s*(00\d)", full_text, re.IGNORECASE)
         for m in matches: extracted_ids.append(m.strip())
         if "004" in full_text: extracted_ids.append("004")
 
-    # 2. 表格處理
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
@@ -282,12 +268,10 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
             header_rows = table[:5]
             header_text = " ".join([str(c).lower() for row in header_rows for c in row if c])
             
-            # 必須有 Unit 或 MDL
-            has_data_feature = "unit" in header_text or "mdl" in header_text or "loq" in header_text or "limit" in header_text or "單位" in header_text or "極限" in header_text
-            if not has_data_feature: continue 
-
-            if "equipment" in header_text or "measured" in header_text: continue
-            if "flow" in header_text and "chart" in header_text: continue
+            # v85: 簡單特徵檢查 (Unit/MDL)
+            if not ("unit" in header_text or "mdl" in header_text or "loq" in header_text or "limit" in header_text or "單位" in header_text):
+                continue
+            if "equipment" in header_text: continue
 
             # --- B. 欄位定位 ---
             item_idx = -1
@@ -296,7 +280,6 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
             for r_idx, row in enumerate(header_rows):
                 for c_idx, cell in enumerate(row):
                     txt = clean_text(cell).lower()
-                    
                     if "test item" in txt or "测试项目" in txt or "測試項目" in txt:
                         item_idx = c_idx
                     
@@ -306,18 +289,17 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
                             result_idx = c_idx
                             break
                     if result_idx != -1: break
-
+                    
                     # 其次 Result
                     if ("result" in txt or "结果" in txt) and "requirement" not in txt and "limit" not in txt:
                         result_idx = c_idx
 
                 if item_idx != -1 and result_idx != -1: break
             
-            if result_idx == -1 and len(table[0]) > 1:
-                result_idx = len(table[0]) - 1
+            if result_idx == -1 and len(table[0]) > 1: result_idx = len(table[0]) - 1
             if item_idx == -1: item_idx = 0
 
-            # --- C. 內容抓取 ---
+            # --- C. 內容抓取 (直球對決) ---
             for r_idx in range(len(table)):
                 row = table[r_idx]
                 if len(row) <= result_idx: continue
@@ -327,9 +309,11 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
 
                 res_val = clean_text(row[result_idx])
                 if not res_val: continue
-                if "pass" in res_val.lower() or "fail" in res_val.lower(): continue 
-
-                res_val_cleaned = clean_value_final(res_val) # v83.0 清洗單位
+                
+                # v85: 清洗值
+                res_val_cleaned = clean_value_final(res_val)
+                if not res_val_cleaned: continue
+                if "pass" in res_val_cleaned.lower(): continue
 
                 # 匹配單項
                 for target, kws in SIMPLE_KEYWORDS.items():
@@ -339,14 +323,17 @@ def parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs):
                             num = float(re.sub(r"[<>]", "", res_val_cleaned))
                         except: num = 0
                         
+                        # SGS/CTI: 只要抓到了就信賴它，不做過多過濾 (除了年份)
                         if num not in [2011, 2015, 62321]: 
                              data_pool[target].append({"priority": (prio, num, res_val_cleaned), "filename": filename})
 
-                # 匹配群組 (PBB/PBDE Sum)
+                # v85: 匹配群組 (PBB/PBDE Sum) - 直球對決
+                # 只要該行名字有 "Sum" 或 "PBBs"，且 Result 欄有值，就抓！
                 for group, kws in GROUP_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
-                        if "nd" in res_val_cleaned.lower():
-                             data_pool[group].append({"priority": (1, 0, "N.D."), "filename": filename})
+                        # 檢查值是否有效
+                        if "nd" in res_val_cleaned.lower() or re.match(r"[\d\.]+", res_val_cleaned):
+                             data_pool[group].append({"priority": (1, 0, res_val_cleaned), "filename": filename})
 
 # --- 5. Main Processing ---
 
@@ -371,7 +358,7 @@ def process_files(files):
                 if company == "INTERTEK":
                     process_intertek(pdf, filename, data_pool, debug_logs)
                 else:
-                    parse_sgs_cti_robust(pdf, filename, company, data_pool, debug_logs)
+                    parse_sgs_cti_original(pdf, filename, company, data_pool, debug_logs)
 
         except Exception as e:
             st.error(f"Error processing {filename}: {e}")
@@ -398,9 +385,9 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek Tool v83.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v83.0 單位清洗與關鍵字補強版)")
-    st.info("💡 v83.0：1. 修正 SGS 報告 'Polybromobiphenyl' 關鍵字漏抓問題。 2. 強制清洗結果欄位中的單位 (mg/kg, ppm)，解決 Pb 抓到 '8 mg/kg' 的問題。 3. 架構維持穩定 (Intertek v72 / SGS&CTI v54)。")
+    st.set_page_config(page_title="SGS/CTI/Intertek Tool v85.0", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v85.0 SGS/CTI 原味回歸版)")
+    st.info("💡 v85.0：SGS/CTI 邏輯完全還原至 v54.2 的直球對決模式。只要 PBB/PBDE 行有值，立刻抓取，不再執行跳過邏輯。Intertek 維持 v72.0 穩定版。")
 
     uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
 

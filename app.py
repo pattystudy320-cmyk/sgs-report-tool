@@ -224,7 +224,7 @@ def process_intertek(pdf, filename, data_pool, debug_logs):
 
 def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
     """
-    SGS/CTI v54.2 邏輯復刻：
+    SGS/CTI 專用解析器：
     1. 先抓 Sample ID (如 "A1", "004")。
     2. 用 Sample ID 在表頭定位 Result 欄位。
     3. 跳過 Summary/Conclusion 表格。
@@ -245,8 +245,7 @@ def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
         m = re.search(r"Sample\s*No\.?\s*[:\.]?\s*([A-Z0-9]+)", full_text, re.IGNORECASE)
         if m: extracted_id = m.group(1).strip()
     elif company == "CTI":
-        # CTI 常見格式: "Model No. : ... " -> 但 Result 欄位通常顯示 "Result 004"
-        # 嘗試抓取 3 位數編號
+        # CTI 常見格式: Result 欄位通常顯示 "Result 004"
         m = re.search(r"Result\s*(00\d)", full_text, re.IGNORECASE)
         if m: extracted_id = m.group(1).strip()
 
@@ -301,7 +300,7 @@ def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
                 if len(row) <= result_idx: continue
                 
                 item_name = clean_text(row[item_idx])
-                # 跳過標題行
+                # 跳過標題行本身
                 if "test item" in item_name.lower() or "result" in item_name.lower(): continue
 
                 res_val = clean_text(row[result_idx])
@@ -311,7 +310,7 @@ def parse_sgs_cti_v54(pdf, filename, company, data_pool, debug_logs):
                     continue
                 if not res_val: continue
 
-                # 匹配目標
+                # 匹配目標項目
                 for target, kws in SIMPLE_KEYWORDS.items():
                     if any(k.lower() in item_name.lower() for k in kws):
                         # SGS/CTI: Result 欄位通常很乾淨 (ND 或 數字)
@@ -385,8 +384,22 @@ def process_files(files):
 # --- Main UI ---
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="SGS/CTI/Intertek Tool v77.0", layout="wide")
-    st.title("📄 萬用型檢測報告聚合工具 (v77.0 樣品編號鎖定版)")
-    st.info("💡 v77.0：Intertek (v72 邏輯) 與 SGS/CTI (v54.2 邏輯) 完美並存。SGS/CTI 恢復使用『樣品編號 (Sample ID)』來精準定位 Result 欄位，徹底解決抓到 'Pass' 的問題。")
+    st.set_page_config(page_title="SGS/CTI/Intertek Tool v77.1", layout="wide")
+    st.title("📄 萬用型檢測報告聚合工具 (v77.1 完整修復版)")
+    st.info("💡 v77.1：修復代碼語法錯誤。功能與 v77.0 一致：Intertek 採用行內掃描，SGS/CTI 採用 Sample ID 鎖定，完美並存。")
 
-    uploaded_files = st.
+    uploaded_files = st.file_uploader("請選取 PDF 檔案", type="pdf", accept_multiple_files=True)
+
+    if uploaded_files:
+        if st.button("🔄 開始分析"):
+            result_data, debug_logs = process_files(uploaded_files)
+            df = pd.DataFrame(result_data)
+            for col in OUTPUT_COLUMNS:
+                if col not in df.columns: df[col] = ""
+            df = df[OUTPUT_COLUMNS]
+            
+            st.success("分析完成")
+            st.dataframe(df)
+            
+            with st.expander("Debug Logs"):
+                st.write(debug_logs)

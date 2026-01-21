@@ -1,7 +1,11 @@
+import streamlit as st
 import pdfplumber
-import os
 import pandas as pd
-import re
+import io
+
+# ==========================================
+# 1. 核心邏輯區 (V54.2 SGS/CTI + V72.0 Intertek)
+# ==========================================
 
 class ReportParserV54:
     def __init__(self):
@@ -32,7 +36,7 @@ class ReportParserV54:
         val = str(value).replace(' ', '').upper()
         
         # 1. 允許 ND
-        if val in ['ND', 'N.D.', 'NEGATIVE', 'Not Detected']: return True
+        if val in ['ND', 'N.D.', 'NEGATIVE', 'NOT DETECTED']: return True
         
         # 2. 嘗試判斷是否為數字
         try:
@@ -41,8 +45,6 @@ class ReportParserV54:
             float(val_clean)
             
             # [V54.2 重點] 過濾掉常見的 MDL 或 Limit，避免抓錯
-            # 排除 2, 5, 10 (常見MDL) 和 100, 1000 (常見限值)
-            # 但保留其他數字 (如您的 7, 4, 143)
             if val_clean in ['2', '5', '8', '10', '50', '100', '1000', '0.010', '0.025']: 
                 return False 
             return True
@@ -61,11 +63,7 @@ class ReportParserV54:
         return "SGS" # 預設使用 SGS 邏輯
 
     def parse_sgs_cti_v54_2(self, tables):
-        """
-        ★ [V54.2 邏輯還原區] - 針對 SGS/CTI 報告
-        1. 強制抓取數字 (解決 Pb 遺失)
-        2. 嚴格區分 PFOA / PFOS (解決 PFAS 混亂)
-        """
+        """[V54.2 邏輯] SGS/CTI: 強制抓數字，分開 PFOA/PFOS"""
         data = {k: "" for k in self.target_map.keys()}
         
         for table in tables:
@@ -78,10 +76,8 @@ class ReportParserV54:
                     if key == 'PFAS_General' and ('PFOA' in row_str or 'PFOS' in row_str):
                         continue
 
-                    # [V54.2 修正] 只有當該行包含關鍵字，且欄位尚未填值時才抓
                     if any(kw.upper() in row_str for kw in keywords) and data[key] == "":
-                        # 從後往前找，抓到第一個符合 is_valid_result 的值
-                        # 這能有效避開前面的 MDL (2) 或 Limit (1000)
+                        # 從後往前找
                         for cell in reversed(row):
                             if self.is_valid_result(cell):
                                 data[key] = cell
@@ -89,10 +85,7 @@ class ReportParserV54:
         return data
 
     def parse_intertek_v72_0(self, tables):
-        """
-        [V72.0 邏輯] - 針對 Intertek 報告
-        利用 Result 欄位定位，避免抓錯
-        """
+        """[V72.0 邏輯] Intertek: 利用 Result 欄位定位"""
         data = {k: "" for k in self.target_map.keys()}
         
         for table in tables:
@@ -132,10 +125,11 @@ class ReportParserV54:
                             data[key] = found_val
         return data
 
-    def process_file(self, file_path):
-        filename = os.path.basename(file_path)
+    def process_file_stream(self, uploaded_file):
+        """處理 Streamlit 上傳的檔案物件"""
+        filename = uploaded_file.name
         try:
-            with pdfplumber.open(file_path) as pdf:
+            with pdfplumber.open(uploaded_file) as pdf:
                 first_page_text = pdf.pages[0].extract_text() or ""
                 lab_type = self.identify_lab(first_page_text)
                 
@@ -144,45 +138,75 @@ class ReportParserV54:
                     tables = page.extract_tables()
                     if tables: all_tables.extend(tables)
                 
-                # ★ 關鍵分流：SGS 用 V54.2，Intertek 用 V72.0
                 if lab_type == "INTERTEK":
                     extracted_data = self.parse_intertek_v72_0(all_tables)
                 else:
                     extracted_data = self.parse_sgs_cti_v54_2(all_tables)
                 
-                result = {"檔案名稱": filename, "實驗室": lab_type}
+                result = {"檔案名稱": filename, "實驗室判斷": lab_type}
                 result.update(extracted_data)
                 return result
                 
         except Exception as e:
-            return {"檔案名稱": filename, "實驗室": "Error", "Pb": str(e)}
+            return {"檔案名稱": filename, "實驗室判斷": "Error", "Pb": f"讀取錯誤: {str(e)}"}
 
 # ==========================================
-# 執行程式
+# 2. Streamlit 網頁介面區 (Frontend UI)
 # ==========================================
-if __name__ == "__main__":
-    # 設定讀取當前目錄下的 PDF
-    source_folder = '.' 
-    pdf_files = [f for f in os.listdir(source_folder) if f.lower().endswith('.pdf')]
-    
-    if not pdf_files:
-        print("❌ 錯誤：找不到 PDF 檔案，請確認檔案與程式在同一資料夾。")
-    else:
-        print(f"🔍 發現 {len(pdf_files)} 個 PDF，開始使用 V54.2/V72.0 混合邏輯分析...\n")
+
+# 設定網頁標題與寬度
+st.set_page_config(page_title="SGS/Intertek 報告聚合工具", layout="wide")
+
+st.title("📄 萬用型檢測報告聚合工具 (V91.0 - V54.2邏輯核心)")
+st.markdown("""
+**功能說明：**
+1. 針對 **SGS/CTI**：使用 V54.2 邏輯，修復鉛(Pb)數值漏抓問題，並精確區分 PFOA/PFOS。
+2. 針對 **Intertek**：使用 V72.0 邏輯，自動對齊 Result 欄位。
+""")
+
+# 檔案上傳區
+uploaded_files = st.file_uploader("請拖曳 PDF 檔案到此處 (可多選)", type="pdf", accept_multiple_files=True)
+
+if uploaded_files:
+    if st.button("🚀 開始分析"):
+        st.info(f"正在處理 {len(uploaded_files)} 份報告，請稍候...")
         
         parser = ReportParserV54()
         all_results = []
-
-        for file in pdf_files:
-            print(f"正在處理: {file} ...")
-            data = parser.process_file(os.path.join(source_folder, file))
-            all_results.append(data)
-
-        # 輸出 Excel
-        df = pd.DataFrame(all_results)
-        cols = ['檔案名稱', '實驗室', 'Pb', 'Cd', 'Hg', 'Cr6+', 'PFOA', 'PFOS', 'PFAS_General']
-        df = df[[c for c in cols if c in df.columns]]
         
-        output_file = "Result_V54_2.xlsx"
-        df.to_excel(output_file, index=False)
-        print(f"\n✅ 成功！報告已產出: {output_file}")
+        # 進度條
+        progress_bar = st.progress(0)
+        
+        for i, file in enumerate(uploaded_files):
+            # 處理單一檔案
+            data = parser.process_file_stream(file)
+            all_results.append(data)
+            # 更新進度
+            progress_bar.progress((i + 1) / len(uploaded_files))
+            
+        st.success("✅ 分析完成！")
+        
+        # 轉換為 DataFrame
+        df = pd.DataFrame(all_results)
+        
+        # 調整欄位順序
+        cols = ['檔案名稱', '實驗室判斷', 'Pb', 'Cd', 'Hg', 'Cr6+', 'PFOA', 'PFOS', 'PFAS_General']
+        # 只保留存在的欄位
+        final_cols = [c for c in cols if c in df.columns]
+        df = df[final_cols]
+        
+        # 顯示資料表格
+        st.dataframe(df, use_container_width=True)
+        
+        # 製作 Excel 下載按鈕
+        # 使用 BytesIO 在記憶體中建立 Excel
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Report Data')
+            
+        st.download_button(
+            label="📥 下載 Excel 報告",
+            data=buffer.getvalue(),
+            file_name="Report_Result_V54_2.xlsx",
+            mime="application/vnd.ms-excel"
+        )

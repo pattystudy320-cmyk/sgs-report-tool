@@ -1,44 +1,38 @@
-import os
 import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
+import os
 import json
 from openai import OpenAI
 
-# =====================
+# ---------------------
 # Basic setup
-# =====================
+# ---------------------
 api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not api_key:
-    st.error("OPENAI_API_KEY not found in secrets")
     st.stop()
 
 client = OpenAI(api_key=api_key)
 
-ITEMS_ORDER = [
-    "ITEM", "Pb", "Cd", "Hg", "CrVI", "PBBs", "PBDEs",
+COLUMNS = [
+    "ITEM", "Pb", "Cd", "Hg", "CrVI",
+    "PBBs", "PBDEs",
     "DEHP", "BBP", "DBP", "DIBP",
     "F", "Cl", "Br", "I", "PFOS", "PFAS",
     "DATE", "FILE"
 ]
 
-CHEMICAL_ITEMS = [
-    "Pb", "Cd", "Hg", "CrVI",
-    "DEHP", "BBP", "DBP", "DIBP",
-    "F", "Cl", "Br", "I", "PFOS"
-]
+PRIORITY = {"number": 3, "negative": 2, "nd": 1, "none": 0}
 
-PRIORITY_MAP = {"number":3,"negative":2,"report":2,"nd":1,"none":0}
-
-# =====================
+# ---------------------
 # PDF text extraction
-# =====================
+# ---------------------
 def extract_text(file):
     text = ""
     try:
         with pdfplumber.open(file) as pdf:
-            for p in pdf.pages[:20]:
+            for p in pdf.pages[:10]:
                 t = p.extract_text()
                 if t:
                     text += t + "\n"
@@ -46,123 +40,49 @@ def extract_text(file):
         return ""
     return text
 
-# =====================
-# Date extraction
-# =====================
-def extract_date(text):
-    m = re.search(r"\b20\d{2}[-/]\d{2}[-/]\d{2}\b", text)
-    return m.group() if m else ""
-
-# =====================
-# AI: find result lines only
-# =====================
-def parse_with_ai(text):
-    """
-    DEBUG 版本：
-    目的不是抓結果，而是『先看 AI 到底回了什麼』
-    """
-    prompt = f"""
-From the following test report text,
-extract possible RESULT LINES only.
-
-Return JSON.
-Do not calculate values.
-Do not summarize.
-
-Items:
-Pb, Cd, Hg, CrVI,
-DEHP, BBP, DBP, DIBP,
-F, Cl, Br, I, PFOS,
-PBBs, PBDEs
-
-Example JSON:
-{{
-  "Pb": ["Lead ... ND"],
-  "Cd": ["Cadmium ... 0.01"],
-  "PFAS_requested": true
-}}
-
-TEXT:
-{text[:16000]}
-"""
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        response_format={"type": "json_object"}
-    )
-
-    raw = response.choices[0].message.content
-
-    # ⭐⭐⭐ 這三行是關鍵 ⭐⭐⭐
-    st.subheader("DEBUG: Raw AI Output")
-    st.code(raw)
-    st.stop()
-    # ⭐⭐⭐ 到這裡程式會「故意停下來」⭐⭐⭐
-
-    return {}
-
-# =====================
-# Rule-based parsing
-# =====================
-def extract_result_from_line(line):
+# ---------------------
+# Simple rule parser (NO AI)
+# ---------------------
+def parse_value(line):
     u = line.upper()
     if "NEGATIVE" in u:
-        return {"type":"negative","value":"NEGATIVE"}
+        return {"type": "negative", "value": "NEGATIVE"}
     if "ND" in u:
-        return {"type":"nd","value":"N.D."}
-    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", line)]
-    nums = [n for n in nums if n not in [1,2,5,10,100,1000]]
+        return {"type": "nd", "value": "N.D."}
+    nums = re.findall(r"\d+(?:\.\d+)?", line)
+    nums = [float(n) for n in nums if n not in ["1","2","5","10","100","1000"]]
     if nums:
-        return {"type":"number","value":max(nums)}
-    return {"type":"none","value":""}
+        return {"type": "number", "value": max(nums)}
+    return {"type": "none", "value": ""}
 
-def pick_best(cur, new, file):
-    if cur is None or PRIORITY_MAP[new["type"]] > PRIORITY_MAP[cur["type"]]:
-        return {**new,"file":file}
-    if new["type"]=="number" and new["value"]>cur["value"]:
-        return {**new,"file":file}
-    return cur
+def pick_best(old, new, file):
+    if old is None or PRIORITY[new["type"]] > PRIORITY[old["type"]]:
+        return {**new, "file": file}
+    if new["type"] == "number" and new["value"] > old["value"]:
+        return {**new, "file": file}
+    return old
 
-# =====================
+# ---------------------
 # UI
-# =====================
+# ---------------------
 st.set_page_config(layout="wide")
-st.title("Test Report Aggregation Tool")
+st.title("Test Report Tool")
 
-files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
+files = st.file_uploader("Upload PDF", type="pdf", accept_multiple_files=True)
 
 if files:
-    final = {}
-    errors = []
-
+    result = {}
     for f in files:
-        try:
-            text = extract_text(f)
-            data = parse_with_ai(text)
+        text = extract_text(f)
+        for line in text.splitlines():
+            for key in ["PB", "CD", "HG", "CR(VI)", "DEHP", "BBP", "DBP", "DIBP"]:
+                if key in line.upper():
+                    r = parse_value(line)
+                    result[key] = pick_best(result.get(key), r, f.name)
 
-            for chem, lines in data.items():
-                if not isinstance(lines, list):
-                    continue
-                for l in lines:
-                    r = extract_result_from_line(l)
-                    final[chem] = pick_best(final.get(chem), r, f.name)
+    row = {"ITEM": "RESULT"}
+    for c in COLUMNS:
+        row[c] = result.get(c, {}).get("value", "")
 
-            d = extract_date(text)
-            if d and "DATE" not in final:
-                final["DATE"] = {"value": d}
-
-        except Exception as e:
-            errors.append({"file":f.name,"error":str(e)})
-
-    row = {"ITEM":"RESULT"}
-    for k in ITEMS_ORDER:
-        row[k] = final.get(k,{}).get("value","")
-
-    st.dataframe(pd.DataFrame([row]), use_container_width=True)
-
-    if errors:
-        st.warning("Some files failed")
-        st.dataframe(pd.DataFrame(errors))
-
+    df = pd.DataFrame([row])
+    st.dataframe(df, use_container_width=True)

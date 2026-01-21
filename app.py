@@ -2,40 +2,44 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
-from datetime import datetime
+import os
+import json
+from openai import OpenAI
 
-# ======================
+# =====================
+# OpenAI Client
+# =====================
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# =====================
 # 基本設定
-# ======================
+# =====================
 ITEMS = [
     "Pb","Cd","Hg","CrVI","PBBs","PBDEs",
     "DEHP","BBP","DBP","DIBP",
     "F","CL","BR","I","PFOS","PFAS"
 ]
 
-PRIORITY = {
-    "number": 3,
-    "negative": 2,
-    "nd": 1,
-    "none": 0
-}
+PRIORITY = {"number":3, "negative":2, "nd":1, "none":0}
 
-# ======================
-# 工具函式
-# ======================
-def extract_text(pdf_file):
+# =====================
+# PDF 文字擷取
+# =====================
+def extract_text(file):
     text = ""
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            t = page.extract_text()
+    with pdfplumber.open(file) as pdf:
+        for p in pdf.pages:
+            t = p.extract_text()
             if t:
                 text += t + "\n"
     if not text.strip():
-        raise ValueError("PDF 無法擷取文字")
+        raise ValueError("無法擷取 PDF 文字")
     return text
 
-
-def detect_date(text):
+# =====================
+# DATE 擷取
+# =====================
+def extract_date(text):
     patterns = [
         r"\b\d{4}[-/]\d{2}[-/]\d{2}\b",
         r"\b\d{2}[-/]\d{2}[-/]\d{4}\b"
@@ -46,103 +50,154 @@ def detect_date(text):
             return m.group()
     return None
 
+# =====================
+# AI 解析
+# =====================
+def parse_with_ai(text):
+    prompt = f"""
+你是一位第三方檢測實驗室的資深工程師。
 
-def classify_value(raw):
-    raw = raw.upper()
-    if raw in ["ND", "N.D.", "NOT DETECTED"]:
-        return "nd", "N.D."
-    if raw == "NEGATIVE":
-        return "negative", "NEGATIVE"
+請解析以下檢測報告內容（不同實驗室格式可能不同），
+請用「語意」判斷，不要依賴欄位名稱。
+
+=== 任務 ===
+擷取以下項目的實際測試結果：
+Pb, Cd, Hg, CrVI,
+DEHP, BBP, DBP, DIBP,
+F, Cl, Br, I,
+PFOS
+
+並判斷：
+1. 是否有 PFAS 檢測（只要有即為 true）
+2. 所有屬於 PBBs 的子項目與結果
+3. 所有屬於 PBDEs 的子項目與結果
+
+=== 規則 ===
+- 結果若為 ND / N.D. / Not Detected / < MDL → "N.D."
+- NEGATIVE → "NEGATIVE"
+- 數值請只回傳數字
+- Limit / MDL / RL 不是結果
+
+=== 輸出 JSON（只輸出 JSON）===
+{{
+  "items": {{
+    "Pb": "N.D.",
+    "Cd": "0.002"
+  }},
+  "pbb_items": [
+    {{"name":"DecaBDE","value":"0.1"}}
+  ],
+  "pbde_items": [
+    {{"name":"PentaBDE","value":"0.05"}}
+  ],
+  "pfas": true
+}}
+
+=== 報告內容 ===
+{text}
+"""
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"user","content":prompt}],
+        temperature=0
+    )
+
+    return json.loads(resp.choices[0].message.content)
+
+# =====================
+# 正規化
+# =====================
+def normalize(val):
+    if val is None:
+        return {"type":"none","value":None}
+    v = str(val).upper()
+    if v in ["ND","N.D.","NOT DETECTED"]:
+        return {"type":"nd","value":None}
+    if v == "NEGATIVE":
+        return {"type":"negative","value":None}
     try:
-        return "number", float(raw)
+        return {"type":"number","value":float(v)}
     except:
-        return "none", None
+        return {"type":"none","value":None}
 
-
-# ⚠️ 這裡是「未來接 AI 的位置」
-def parse_report_with_ai(text):
-    """
-    未來由 AI 回傳格式：
-    {
-      "Pb": {"type":"number","value":20},
-      ...
-      "PFAS":"REPORT"
-    }
-    """
-    raise NotImplementedError("尚未接 AI")
-
-
-# ======================
-# 彙總邏輯
-# ======================
-def pick_best(existing, new):
-    if existing is None:
-        return new
-    if PRIORITY[new["type"]] > PRIORITY[existing["type"]]:
-        return new
-    if new["type"] == "number" and new["value"] > existing["value"]:
-        return new
-    return existing
-
-
-# ======================
-# Streamlit UI
-# ======================
-st.set_page_config(page_title="RoHS / PFAS Report Parser", layout="wide")
-st.title("檢測報告自動彙總工具")
-
-uploaded_files = st.file_uploader(
-    "請上傳檢測報告 PDF（可多選）",
-    type=["pdf"],
-    accept_multiple_files=True
-)
-
-if uploaded_files:
-    results = {item: None for item in ITEMS}
-    date_result = None
-    pb_source_file = None
-    error_files = []
-
-    for file in uploaded_files:
+def sum_items(items):
+    total = 0.0
+    for i in items:
         try:
-            text = extract_text(file)
+            total += float(i["value"])
+        except:
+            continue
+    return total if total > 0 else "N.D."
 
-            # DATE
-            date = detect_date(text)
+def pick_best(old, new):
+    if old is None:
+        return new
+    if PRIORITY[new["type"]] > PRIORITY[old["type"]]:
+        return new
+    if new["type"]=="number" and new["value"]>old["value"]:
+        return new
+    return old
+
+# =====================
+# Streamlit UI
+# =====================
+st.set_page_config(page_title="RoHS / PFAS Parser", layout="wide")
+st.title("第三方檢測報告自動彙總系統")
+
+files = st.file_uploader("上傳 PDF（可多選）", type="pdf", accept_multiple_files=True)
+
+if files:
+    results = {i:None for i in ITEMS}
+    pb_source = None
+    date_result = None
+    errors = []
+
+    for f in files:
+        try:
+            text = extract_text(f)
+            date = extract_date(text)
             if date and not date_result:
                 date_result = date
 
-            # ⚠️ 這裡之後會換成 AI
-            raise NotImplementedError("尚未實作 AI 解析")
+            ai = parse_with_ai(text)
+
+            # 一般項目
+            for k,v in ai["items"].items():
+                norm = normalize(v)
+                norm["file"] = f.name
+                results[k] = pick_best(results[k], norm)
+
+            # PBBs / PBDEs
+            pbb_sum = sum_items(ai.get("pbb_items",[]))
+            pbde_sum = sum_items(ai.get("pbde_items",[]))
+
+            results["PBBs"] = pick_best(results["PBBs"], normalize(pbb_sum))
+            results["PBDEs"] = pick_best(results["PBDEs"], normalize(pbde_sum))
+
+            # PFAS
+            if ai.get("pfas"):
+                results["PFAS"] = {"type":"report","value":"REPORT","file":f.name}
 
         except Exception as e:
-            error_files.append({
-                "file": file.name,
-                "error": str(e)
-            })
+            errors.append({"檔案":f.name,"錯誤原因":str(e)})
 
-    # ======================
+    if results["Pb"] and results["Pb"]["type"]=="number":
+        pb_source = results["Pb"]["file"]
+
+    # =====================
     # 顯示結果
-    # ======================
+    # =====================
     st.subheader("彙總結果")
 
-    data = {
-        "ITEM": ["RESULT"],
-    }
+    row = {"ITEM":"RESULT"}
+    for i in ITEMS:
+        row[i] = results[i]["value"] if results[i] else ""
+    row["DATE"] = date_result
+    row["檔案名稱"] = pb_source
 
-    for item in ITEMS:
-        data[item] = [results[item]["value"] if results[item] else ""]
+    st.dataframe(pd.DataFrame([row]), use_container_width=True)
 
-    data["DATE"] = [date_result]
-    data["檔案名稱"] = [pb_source_file]
-
-    df = pd.DataFrame(data)
-    st.dataframe(df, use_container_width=True)
-
-    # ======================
-    # 錯誤檔案顯示
-    # ======================
-    if error_files:
+    if errors:
         st.subheader("⚠️ 解析失敗的檔案")
-        err_df = pd.DataFrame(error_files)
-        st.dataframe(err_df, use_container_width=True)
+        st.dataframe(pd.DataFrame(errors), use_container_width=True)

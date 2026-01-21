@@ -1,3 +1,5 @@
+import sys
+import io
 import streamlit as st
 import pdfplumber
 import pandas as pd
@@ -7,10 +9,14 @@ import json
 from openai import OpenAI
 
 # =====================
+# 1. 強制編碼修正 (解決 'ascii' codec 錯誤的核心)
+# =====================
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+# =====================
 # 基本設定與 Client 初始化
 # =====================
-
-# 優先嘗試從 Streamlit secrets 讀取，若無則從環境變數讀取
 api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
 if not api_key:
@@ -28,7 +34,7 @@ ITEMS = [
 PRIORITY = {"number": 3, "negative": 2, "nd": 1, "report": 1, "none": 0}
 
 # =====================
-# PDF 文字擷取 (已加入編碼濾水器 🛡️)
+# PDF 文字擷取 (含過濾器)
 # =====================
 def extract_text(file):
     text = ""
@@ -44,8 +50,7 @@ def extract_text(file):
     if not text.strip():
         raise ValueError("無法擷取 PDF 文字 (可能是掃描檔或加密)")
 
-    # [關鍵修正] 強制轉換編碼，忽略無法辨識的特殊符號，避免 ASCII 錯誤
-    # 這行代碼會把所有文字強制轉成 UTF-8，如果有亂碼就直接丟棄 (ignore)
+    # 強制編碼清洗，避免任何特殊符號導致後續崩潰
     return text.encode("utf-8", "ignore").decode("utf-8")
 
 # =====================
@@ -66,7 +71,7 @@ def extract_date(text):
 # AI 解析
 # =====================
 def parse_with_ai(text):
-    # 限制文字長度以節省 Token
+    # 限制文字長度，避免 Token 超出且節省成本
     truncated_text = text[:3500] 
     
     prompt = f"""
@@ -190,27 +195,31 @@ if files:
 
     with st.status("正在分析報告...", expanded=True) as status:
         for f in files:
-            # 檔名也做一次清洗，防止檔名裡的特殊符號讓系統崩潰
+            # 檔名清洗：避免檔名含有特殊符號導致顯示錯誤
             safe_filename = f.name.encode("utf-8", "ignore").decode("utf-8")
             st.write(f"正在處理: {safe_filename}")
             
             try:
+                # 1. 讀取文字
                 text = extract_text(f)
                 
+                # 2. 擷取日期
                 date = extract_date(text)
                 if date and not date_result:
                     date_result = date
 
+                # 3. AI 解析
                 ai = parse_with_ai(text)
 
-                # 1. 一般項目
+                # 4. 彙整結果
+                # 一般項目
                 for k, v in ai.get("items", {}).items():
                     if k in ITEMS:
                         norm = normalize(v)
                         norm["file"] = safe_filename
                         results[k] = pick_best(results[k], norm)
 
-                # 2. PBBs / PBDEs 加總
+                # PBBs / PBDEs 加總
                 pbb_sum = sum_items(ai.get("pbb_items", []))
                 pbde_sum = sum_items(ai.get("pbde_items", []))
 
@@ -222,16 +231,17 @@ if files:
                 norm_pbde["file"] = safe_filename
                 results["PBDEs"] = pick_best(results["PBDEs"], norm_pbde)
 
-                # 3. PFAS
+                # PFAS
                 if ai.get("pfas"):
                     pfas_res = {"type": "report", "value": "REPORT", "file": safe_filename}
                     results["PFAS"] = pick_best(results["PFAS"], pfas_res)
 
             except Exception as e:
-                # 錯誤訊息轉換為字串時也做保護
+                # 錯誤訊息轉換：確保錯誤訊息本身也不會導致編碼錯誤
                 error_msg = str(e).encode("utf-8", "ignore").decode("utf-8")
                 errors.append({"檔案": safe_filename, "錯誤原因": error_msg})
-                st.error(f"{safe_filename} 發生錯誤: {error_msg}")
+                # 這裡不使用 st.error 以免中斷畫面，統一在最後表格顯示
+                print(f"Error processing {safe_filename}: {error_msg}")
 
         status.update(label="分析完成", state="complete", expanded=False)
 

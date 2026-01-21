@@ -39,7 +39,7 @@ PRIORITY_MAP = {
 }
 
 # =====================
-# 2. PDF 文字擷取
+# 2. PDF 文字擷取（UTF-8 安全）
 # =====================
 def extract_text(file):
     text = ""
@@ -51,7 +51,9 @@ def extract_text(file):
                     text += f"\n--- Page {i+1} ---\n{t}"
     except:
         return ""
-    return text
+
+    # ⭐ 強制 UTF-8，避免 ASCII 錯誤
+    return text.encode("utf-8", "ignore").decode("utf-8")
 
 # =====================
 # 3. 日期擷取
@@ -84,7 +86,7 @@ PBBs, PBDEs
 === 規則 ===
 - 回傳完整行文字
 - 同一項目可多行
-- 不要回 Limit / MDL 說明
+- 不要回 Limit / MDL
 - 不要判斷數值
 
 === JSON ===
@@ -97,13 +99,17 @@ PBBs, PBDEs
 === 內容 ===
 {text[:16000]}
 """
+
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
     )
-    return json.loads(response.choices[0].message.content)
+
+    raw = response.choices[0].message.content
+    safe = raw.encode("utf-8", "ignore").decode("utf-8")
+    return json.loads(safe)
 
 # =====================
 # 5. Python 規則判讀
@@ -151,16 +157,18 @@ if uploaded_files:
 
     for f in uploaded_files:
         try:
+            safe_filename = f.name.encode("utf-8", "ignore").decode("utf-8")
+
             text = extract_text(f)
             if not text:
-                raise ValueError("無法讀取 PDF")
+                raise ValueError("無法讀取 PDF 文字")
 
             ai_data = parse_with_ai(text)
 
             for chem, lines in ai_data.items():
                 if chem == "PFAS_requested":
                     val = {"type": "report", "value": "REPORT"} if lines else {"type": "nd", "value": "N.D."}
-                    final_results["PFAS"] = compare_and_pick_best(final_results.get("PFAS"), val, f.name)
+                    final_results["PFAS"] = compare_and_pick_best(final_results.get("PFAS"), val, safe_filename)
                     continue
 
                 if not isinstance(lines, list):
@@ -173,19 +181,20 @@ if uploaded_files:
                         if r["type"] == "number":
                             nums.append(r["value"])
                     val = {"type": "number", "value": sum(nums)} if nums else {"type": "nd", "value": "N.D."}
-                    final_results[chem] = compare_and_pick_best(final_results.get(chem), val, f.name)
+                    final_results[chem] = compare_and_pick_best(final_results.get(chem), val, safe_filename)
 
                 elif chem in CHEMICAL_ITEMS:
                     for l in lines:
                         r = extract_result_from_line(l)
-                        final_results[chem] = compare_and_pick_best(final_results.get(chem), r, f.name)
+                        final_results[chem] = compare_and_pick_best(final_results.get(chem), r, safe_filename)
 
             date = extract_date(text)
             if date and "DATE" not in final_results:
                 final_results["DATE"] = {"value": date}
 
         except Exception as e:
-            errors.append({"檔案": f.name, "錯誤": str(e)})
+            safe_error = str(e).encode("utf-8", "ignore").decode("utf-8")
+            errors.append({"檔案": safe_filename, "錯誤": safe_error})
 
     row = {"ITEM": "RESULT"}
     for k in ITEMS_ORDER:
@@ -198,5 +207,5 @@ if uploaded_files:
     st.dataframe(df, use_container_width=True)
 
     if errors:
-        st.warning("⚠️ 以下檔案解析失敗")
-        st.dataframe(pd.DataFrame(errors))
+        st.warning("⚠️ 以下檔案解析失敗（不影響其他檔案）")
+        st.dataframe(pd.DataFrame(errors), use_container_width=True)

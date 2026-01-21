@@ -25,11 +25,10 @@ ITEMS = [
     "F", "Cl", "Br", "I", "PFOS", "PFAS"
 ]
 
-# 修正：加入 "report" 類型以避免 PFAS 邏輯報錯
 PRIORITY = {"number": 3, "negative": 2, "nd": 1, "report": 1, "none": 0}
 
 # =====================
-# PDF 文字擷取
+# PDF 文字擷取 (已加入編碼濾水器 🛡️)
 # =====================
 def extract_text(file):
     text = ""
@@ -44,7 +43,10 @@ def extract_text(file):
         
     if not text.strip():
         raise ValueError("無法擷取 PDF 文字 (可能是掃描檔或加密)")
-    return text
+
+    # [關鍵修正] 強制轉換編碼，忽略無法辨識的特殊符號，避免 ASCII 錯誤
+    # 這行代碼會把所有文字強制轉成 UTF-8，如果有亂碼就直接丟棄 (ignore)
+    return text.encode("utf-8", "ignore").decode("utf-8")
 
 # =====================
 # DATE 擷取
@@ -61,11 +63,11 @@ def extract_date(text):
     return None
 
 # =====================
-# AI 解析 (修正為新版 OpenAI API 語法)
+# AI 解析
 # =====================
 def parse_with_ai(text):
-    # 限制文字長度以節省 Token (視情況調整)
-    truncated_text = text[:3000] 
+    # 限制文字長度以節省 Token
+    truncated_text = text[:3500] 
     
     prompt = f"""
 你是一位第三方檢測實驗室的資深工程師。
@@ -116,7 +118,7 @@ PFOS
             {"role": "user", "content": prompt}
         ],
         temperature=0,
-        response_format={"type": "json_object"} # 強制 JSON 模式 (避免 AI 亂說話)
+        response_format={"type": "json_object"}
     )
 
     content = response.choices[0].message.content
@@ -129,17 +131,15 @@ def normalize(val):
     if val is None:
         return {"type": "none", "value": None}
     
-    # 處理 dict 類型 (如果是 PFAS report 邏輯傳入)
     if isinstance(val, dict) and val.get("type") == "report":
         return val
 
     v = str(val).strip().upper()
     if v in ["ND", "N.D.", "NOT DETECTED", "<MDL", "<RL"]:
-        return {"type": "nd", "value": "N.D."} # 修正：保留 N.D. 字串以便顯示
+        return {"type": "nd", "value": "N.D."}
     if v == "NEGATIVE":
         return {"type": "negative", "value": "NEGATIVE"}
     try:
-        # 移除可能的單位或是非數字字符
         clean_v = re.sub(r"[^\d\.]", "", v)
         return {"type": "number", "value": float(clean_v)}
     except:
@@ -153,7 +153,6 @@ def sum_items(items):
             val_str = str(i["value"]).upper()
             if "N.D." in val_str or "ND" in val_str:
                 continue
-            # 清理非數字
             clean_val = re.sub(r"[^\d\.]", "", val_str)
             total += float(clean_val)
             has_value = True
@@ -165,14 +164,12 @@ def pick_best(old, new):
     if old is None:
         return new
     
-    # 安全檢查：確保 type 存在於 PRIORITY 中
     old_p = PRIORITY.get(old["type"], 0)
     new_p = PRIORITY.get(new["type"], 0)
     
     if new_p > old_p:
         return new
     if new["type"] == "number" and old["type"] == "number":
-        # 取大值
         if new["value"] > old["value"]:
             return new
     return old
@@ -193,49 +190,51 @@ if files:
 
     with st.status("正在分析報告...", expanded=True) as status:
         for f in files:
-            st.write(f"正在處理: {f.name}")
+            # 檔名也做一次清洗，防止檔名裡的特殊符號讓系統崩潰
+            safe_filename = f.name.encode("utf-8", "ignore").decode("utf-8")
+            st.write(f"正在處理: {safe_filename}")
+            
             try:
                 text = extract_text(f)
                 
-                # 嘗試擷取日期
                 date = extract_date(text)
                 if date and not date_result:
                     date_result = date
 
-                # AI 解析
                 ai = parse_with_ai(text)
 
-                # 1. 一般項目處理
+                # 1. 一般項目
                 for k, v in ai.get("items", {}).items():
                     if k in ITEMS:
                         norm = normalize(v)
-                        norm["file"] = f.name
+                        norm["file"] = safe_filename
                         results[k] = pick_best(results[k], norm)
 
-                # 2. PBBs / PBDEs 加總處理
+                # 2. PBBs / PBDEs 加總
                 pbb_sum = sum_items(ai.get("pbb_items", []))
                 pbde_sum = sum_items(ai.get("pbde_items", []))
 
                 norm_pbb = normalize(pbb_sum)
-                norm_pbb["file"] = f.name
+                norm_pbb["file"] = safe_filename
                 results["PBBs"] = pick_best(results["PBBs"], norm_pbb)
 
                 norm_pbde = normalize(pbde_sum)
-                norm_pbde["file"] = f.name
+                norm_pbde["file"] = safe_filename
                 results["PBDEs"] = pick_best(results["PBDEs"], norm_pbde)
 
-                # 3. PFAS 特別處理
+                # 3. PFAS
                 if ai.get("pfas"):
-                    pfas_res = {"type": "report", "value": "REPORT", "file": f.name}
+                    pfas_res = {"type": "report", "value": "REPORT", "file": safe_filename}
                     results["PFAS"] = pick_best(results["PFAS"], pfas_res)
 
             except Exception as e:
-                errors.append({"檔案": f.name, "錯誤原因": str(e)})
-                st.error(f"{f.name} 發生錯誤: {e}")
+                # 錯誤訊息轉換為字串時也做保護
+                error_msg = str(e).encode("utf-8", "ignore").decode("utf-8")
+                errors.append({"檔案": safe_filename, "錯誤原因": error_msg})
+                st.error(f"{safe_filename} 發生錯誤: {error_msg}")
 
         status.update(label="分析完成", state="complete", expanded=False)
 
-    # 擷取 Pb 來源檔案名稱
     if results["Pb"] and results["Pb"].get("file"):
         pb_source = results["Pb"]["file"]
 
@@ -244,7 +243,6 @@ if files:
     # =====================
     st.subheader("彙總結果")
 
-    # 建立顯示用的 Dict
     row = {}
     for i in ITEMS:
         res = results[i]

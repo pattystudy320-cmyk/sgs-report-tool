@@ -1,24 +1,17 @@
-# ======== ⭐⭐⭐ 最重要的一行（ASCII 問題的根因解法）⭐⭐⭐ ========
-import sys
-sys.stdout.reconfigure(encoding="utf-8")
-sys.stderr.reconfigure(encoding="utf-8")
-# =================================================================
-
+import os
 import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
-import os
 import json
 from openai import OpenAI
 
 # =====================
-# 1. 基本設定
+# Basic setup
 # =====================
 api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-
 if not api_key:
-    st.error("❌ 未偵測到 API Key，請在 Streamlit Secrets 設定 OPENAI_API_KEY")
+    st.error("OPENAI_API_KEY not found in secrets")
     st.stop()
 
 client = OpenAI(api_key=api_key)
@@ -27,7 +20,7 @@ ITEMS_ORDER = [
     "ITEM", "Pb", "Cd", "Hg", "CrVI", "PBBs", "PBDEs",
     "DEHP", "BBP", "DBP", "DIBP",
     "F", "Cl", "Br", "I", "PFOS", "PFAS",
-    "DATE", "檔案名稱"
+    "DATE", "FILE"
 ]
 
 CHEMICAL_ITEMS = [
@@ -36,135 +29,111 @@ CHEMICAL_ITEMS = [
     "F", "Cl", "Br", "I", "PFOS"
 ]
 
-PRIORITY_MAP = {
-    "number": 3,
-    "negative": 2,
-    "report": 2,
-    "nd": 1,
-    "none": 0
-}
+PRIORITY_MAP = {"number":3,"negative":2,"report":2,"nd":1,"none":0}
 
 # =====================
-# 2. PDF 文字擷取（UTF-8 安全）
+# PDF text extraction
 # =====================
 def extract_text(file):
     text = ""
     try:
         with pdfplumber.open(file) as pdf:
-            for i, p in enumerate(pdf.pages[:20]):
-                t = p.extract_text(layout=True, x_tolerance=2)
+            for p in pdf.pages[:20]:
+                t = p.extract_text()
                 if t:
-                    text += f"\n--- Page {i+1} ---\n{t}"
+                    text += t + "\n"
     except:
         return ""
-    return text.encode("utf-8", "ignore").decode("utf-8")
+    return text
 
 # =====================
-# 3. 日期擷取
+# Date extraction
 # =====================
 def extract_date(text):
-    patterns = [
-        r"\b20\d{2}[-/]\d{2}[-/]\d{2}\b",
-        r"\b\d{2}[-/]\d{2}[-/]20\d{2}\b",
-        r"\b\d{2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+20\d{2}\b"
-    ]
-    for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
-        if m:
-            return m.group()
-    return None
+    m = re.search(r"\b20\d{2}[-/]\d{2}[-/]\d{2}\b", text)
+    return m.group() if m else ""
 
 # =====================
-# 4. AI：只找可能的結果行
+# AI: find result lines only
 # =====================
 def parse_with_ai(text):
     prompt = f"""
-請找出檢測結果所在的整行文字，不要判斷數值。
+Find result lines only. Do not calculate values.
 
-項目：
+Items:
 Pb, Cd, Hg, CrVI, DEHP, BBP, DBP, DIBP,
 F, Cl, Br, I, PFOS, PBBs, PBDEs
 
-JSON 格式：
-{{ "Pb": ["Lead ... ND"], "PFAS_requested": true }}
-
-內容：
+JSON only.
 {text[:16000]}
 """
-    response = client.chat.completions.create(
+    r = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role":"user","content":prompt}],
         temperature=0,
-        response_format={"type": "json_object"}
+        response_format={"type":"json_object"}
     )
-    raw = response.choices[0].message.content
-    return json.loads(raw.encode("utf-8", "ignore").decode("utf-8"))
+    return json.loads(r.choices[0].message.content)
 
 # =====================
-# 5. Python 規則判讀
+# Rule-based parsing
 # =====================
 def extract_result_from_line(line):
     u = line.upper()
     if "NEGATIVE" in u:
-        return {"type": "negative", "value": "NEGATIVE"}
-    if "N.D" in u or re.search(r"\bND\b", u):
-        return {"type": "nd", "value": "N.D."}
+        return {"type":"negative","value":"NEGATIVE"}
+    if "ND" in u:
+        return {"type":"nd","value":"N.D."}
     nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", line)]
     nums = [n for n in nums if n not in [1,2,5,10,100,1000]]
     if nums:
-        return {"type": "number", "value": max(nums)}
-    return {"type": "none", "value": None}
+        return {"type":"number","value":max(nums)}
+    return {"type":"none","value":""}
 
-def compare_and_pick_best(cur, new, file):
+def pick_best(cur, new, file):
     if cur is None or PRIORITY_MAP[new["type"]] > PRIORITY_MAP[cur["type"]]:
-        return {**new, "file": file}
-    if new["type"] == "number" and new["value"] > cur["value"]:
-        return {**new, "file": file}
+        return {**new,"file":file}
+    if new["type"]=="number" and new["value"]>cur["value"]:
+        return {**new,"file":file}
     return cur
 
 # =====================
-# 6. Streamlit UI
+# UI
 # =====================
-st.set_page_config(page_title="檢測報告彙總系統", layout="wide")
-st.title("🧪 第三方檢測報告自動彙總系統")
+st.set_page_config(layout="wide")
+st.title("Test Report Aggregation Tool")
 
-uploaded_files = st.file_uploader("上傳 PDF", type="pdf", accept_multiple_files=True)
+files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
 
-if uploaded_files:
-    final_results = {}
+if files:
+    final = {}
     errors = []
 
-    for f in uploaded_files:
+    for f in files:
         try:
-            fname = f.name.encode("utf-8","ignore").decode("utf-8")
             text = extract_text(f)
-            ai_data = parse_with_ai(text)
+            data = parse_with_ai(text)
 
-            for chem, lines in ai_data.items():
-                if chem == "PFAS_requested":
-                    val = {"type":"report","value":"REPORT"} if lines else {"type":"nd","value":"N.D."}
-                    final_results["PFAS"] = compare_and_pick_best(final_results.get("PFAS"), val, fname)
-                elif isinstance(lines,list):
-                    for l in lines:
-                        r = extract_result_from_line(l)
-                        final_results[chem] = compare_and_pick_best(final_results.get(chem), r, fname)
+            for chem, lines in data.items():
+                if not isinstance(lines, list):
+                    continue
+                for l in lines:
+                    r = extract_result_from_line(l)
+                    final[chem] = pick_best(final.get(chem), r, f.name)
 
             d = extract_date(text)
-            if d and "DATE" not in final_results:
-                final_results["DATE"] = {"value": d}
+            if d and "DATE" not in final:
+                final["DATE"] = {"value": d}
 
         except Exception as e:
-            errors.append({
-                "檔案": fname,
-                "錯誤": str(e).encode("utf-8","ignore").decode("utf-8")
-            })
+            errors.append({"file":f.name,"error":str(e)})
 
     row = {"ITEM":"RESULT"}
     for k in ITEMS_ORDER:
-        row[k] = final_results.get(k,{}).get("value","")
+        row[k] = final.get(k,{}).get("value","")
 
     st.dataframe(pd.DataFrame([row]), use_container_width=True)
 
     if errors:
-        st.warning("⚠️ 以下檔案解析失敗（不影響其他檔案）")
-        st.dataframe(pd.DataFrame(errors), use_container_width=True)
+        st.warning("Some files failed")
+        st.dataframe(pd.DataFrame(errors))

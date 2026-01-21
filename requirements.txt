@@ -1,4 +1,4 @@
 streamlit
 pdfplumber
 pandas
-openpyxl
+openai==0.28.1

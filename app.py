@@ -1,5 +1,3 @@
-import sys
-import io
 import streamlit as st
 import pdfplumber
 import pandas as pd
@@ -9,14 +7,9 @@ import json
 from openai import OpenAI
 
 # =====================
-# 1. 強制編碼修正 (解決 'ascii' codec 錯誤的核心)
-# =====================
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
-# =====================
 # 基本設定與 Client 初始化
 # =====================
+# 嘗試讀取 API Key
 api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
 if not api_key:
@@ -34,7 +27,7 @@ ITEMS = [
 PRIORITY = {"number": 3, "negative": 2, "nd": 1, "report": 1, "none": 0}
 
 # =====================
-# PDF 文字擷取 (含過濾器)
+# PDF 文字擷取 (安全版)
 # =====================
 def extract_text(file):
     text = ""
@@ -45,12 +38,14 @@ def extract_text(file):
                 if t:
                     text += t + "\n"
     except Exception as e:
-        raise ValueError(f"PDF 讀取錯誤: {str(e)}")
+        # 這裡不丟出錯誤，而是回傳空字串讓後續處理，避免直接崩潰
+        return ""
         
     if not text.strip():
-        raise ValueError("無法擷取 PDF 文字 (可能是掃描檔或加密)")
+        # 如果抓不到字，回傳空字串
+        return ""
 
-    # 強制編碼清洗，避免任何特殊符號導致後續崩潰
+    # [關鍵]：強制濾掉亂碼，確保回傳的是乾淨的 UTF-8 字串
     return text.encode("utf-8", "ignore").decode("utf-8")
 
 # =====================
@@ -71,7 +66,10 @@ def extract_date(text):
 # AI 解析
 # =====================
 def parse_with_ai(text):
-    # 限制文字長度，避免 Token 超出且節省成本
+    if not text:
+        return {}
+
+    # 限制文字長度
     truncated_text = text[:3500] 
     
     prompt = f"""
@@ -117,17 +115,19 @@ PFOS
 {truncated_text}
 """
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0,
-        response_format={"type": "json_object"}
-    )
-
-    content = response.choices[0].message.content
-    return json.loads(content)
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            response_format={"type": "json_object"}
+        )
+        content = response.choices[0].message.content
+        return json.loads(content)
+    except Exception:
+        return {}
 
 # =====================
 # 正規化與邏輯處理
@@ -193,25 +193,36 @@ if files:
     date_result = ""
     errors = []
 
+    # 使用 Status 容器顯示進度
     with st.status("正在分析報告...", expanded=True) as status:
         for f in files:
-            # 檔名清洗：避免檔名含有特殊符號導致顯示錯誤
-            safe_filename = f.name.encode("utf-8", "ignore").decode("utf-8")
+            # 1. 檔名清洗：這是最常出錯的地方，我們強制把它轉成安全字串
+            # 如果檔名有無法編碼的字，就用 'unknown_file' 代替，防止系統崩潰
+            try:
+                safe_filename = f.name.encode("utf-8", "ignore").decode("utf-8")
+            except:
+                safe_filename = "unknown_filename.pdf"
+                
             st.write(f"正在處理: {safe_filename}")
             
             try:
-                # 1. 讀取文字
+                # 2. 讀取文字
                 text = extract_text(f)
                 
-                # 2. 擷取日期
+                if not text:
+                    raise ValueError("無法讀取 PDF 文字 (可能是圖片掃描檔)")
+
+                # 3. 擷取日期
                 date = extract_date(text)
                 if date and not date_result:
                     date_result = date
 
-                # 3. AI 解析
+                # 4. AI 解析
                 ai = parse_with_ai(text)
+                if not ai:
+                    raise ValueError("AI 無法解析內容")
 
-                # 4. 彙整結果
+                # 5. 彙整結果
                 # 一般項目
                 for k, v in ai.get("items", {}).items():
                     if k in ITEMS:
@@ -237,11 +248,14 @@ if files:
                     results["PFAS"] = pick_best(results["PFAS"], pfas_res)
 
             except Exception as e:
-                # 錯誤訊息轉換：確保錯誤訊息本身也不會導致編碼錯誤
-                error_msg = str(e).encode("utf-8", "ignore").decode("utf-8")
+                # 這裡也要防呆，確保錯誤訊息不會包含亂碼
+                try:
+                    error_msg = str(e)
+                except:
+                    error_msg = "未知錯誤 (編碼異常)"
+                
                 errors.append({"檔案": safe_filename, "錯誤原因": error_msg})
-                # 這裡不使用 st.error 以免中斷畫面，統一在最後表格顯示
-                print(f"Error processing {safe_filename}: {error_msg}")
+                # 注意：這裡刪除了 print()，避免後台編碼錯誤
 
         status.update(label="分析完成", state="complete", expanded=False)
 

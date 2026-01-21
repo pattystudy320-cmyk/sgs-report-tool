@@ -57,23 +57,51 @@ def extract_date(text):
 # AI: find result lines only
 # =====================
 def parse_with_ai(text):
+    """
+    DEBUG 版本：
+    目的不是抓結果，而是『先看 AI 到底回了什麼』
+    """
     prompt = f"""
-Find result lines only. Do not calculate values.
+From the following test report text,
+extract possible RESULT LINES only.
+
+Return JSON.
+Do not calculate values.
+Do not summarize.
 
 Items:
-Pb, Cd, Hg, CrVI, DEHP, BBP, DBP, DIBP,
-F, Cl, Br, I, PFOS, PBBs, PBDEs
+Pb, Cd, Hg, CrVI,
+DEHP, BBP, DBP, DIBP,
+F, Cl, Br, I, PFOS,
+PBBs, PBDEs
 
-JSON only.
+Example JSON:
+{{
+  "Pb": ["Lead ... ND"],
+  "Cd": ["Cadmium ... 0.01"],
+  "PFAS_requested": true
+}}
+
+TEXT:
 {text[:16000]}
 """
-    r = client.chat.completions.create(
+
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}],
+        messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        response_format={"type":"json_object"}
+        response_format={"type": "json_object"}
     )
-    return json.loads(r.choices[0].message.content)
+
+    raw = response.choices[0].message.content
+
+    # ⭐⭐⭐ 這三行是關鍵 ⭐⭐⭐
+    st.subheader("DEBUG: Raw AI Output")
+    st.code(raw)
+    st.stop()
+    # ⭐⭐⭐ 到這裡程式會「故意停下來」⭐⭐⭐
+
+    return {}
 
 # =====================
 # Rule-based parsing
@@ -137,3 +165,4 @@ if files:
     if errors:
         st.warning("Some files failed")
         st.dataframe(pd.DataFrame(errors))
+

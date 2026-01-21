@@ -41,19 +41,20 @@ PRIORITY_MAP = {
 }
 
 # =====================
-# 2. PDF 文字擷取 (保留 Layout 以便閱讀表格)
+# 2. PDF 文字擷取 (v7.0 優化版)
 # =====================
 def extract_text(file):
     text = ""
     try:
         with pdfplumber.open(file) as pdf:
-            # 讀取前 20 頁 (確保 Test Requested 和 Result 都在範圍內)
+            # 讀取前 20 頁，確保覆蓋 Test Requested 和主要數據
             max_pages = 20 
             for i, p in enumerate(pdf.pages):
                 if i >= max_pages: break 
                 
-                # layout=True 能保留表格的物理位置，幫助 AI 對齊欄位
-                t = p.extract_text(layout=True) 
+                # layout=True: 保持物理位置 (適合 CTI/SGS 表格)
+                # x_tolerance=2: 稍微放寬左右字的黏合度，避免 CTI 的字太散
+                t = p.extract_text(layout=True, x_tolerance=2) 
                 if t:
                     text += f"--- Page {i+1} ---\n{t}\n"
     except Exception:
@@ -81,7 +82,7 @@ def extract_date(text):
     return None
 
 # =====================
-# 4. AI 解析 (v6.0 核心升級)
+# 4. AI 解析 (v7.0 核心指令升級)
 # =====================
 def parse_with_ai(text):
     if not text:
@@ -93,27 +94,31 @@ def parse_with_ai(text):
     prompt = f"""
 你是一位檢測報告數據提取專家。請分析以下 PDF 文字，提取化學檢測結果。
 
-=== 1. PFAS 判讀規則 (最重要) ===
-請仔細閱讀報告中的 **"Test Requested" (測試需求)**、**"Test Conducted" (測試內容)** 或 **"Sample Description"** 區塊。
-**只要**在這些「測試範圍描述」中發現以下關鍵字，請將 "pfas_detected" 設為 true：
+=== 1. PFAS 判讀規則 (Intertek/SGS/CTI 通用) ===
+請搜尋報告中的標題區塊，例如：
+**"Test Requested" (測試需求)** 或 **"Test Conducted" (測試內容)** 或 **"Conclusion"**。
+**只要**在這些「定義測試範圍」的區塊中，出現以下任何關鍵字：
 - "PFAS"
 - "Per- and polyfluoroalkyl substances"
 - "全氟/多氟烷基物質"
-*注意：不需要看到具體數值，只要「測試項目」裡有提到要測 PFAS，就視為 true。*
+請將 "pfas_detected" 設為 true。(代表客戶有要求做這項測試)
 
-=== 2. 化學物質數值提取 ===
-請忽略 MDL (偵測極限)、RL (報告極限) 和 Limit (限值)。**只抓取 "Result" (結果) 欄位**。
+=== 2. 化學物質數值提取 (解決 CTI 表格問題) ===
+請忽略 MDL (偵測極限)、RL (報告極限)、Limit (限值) 和 Unit (單位, 如 mg/kg)。
+**只抓取 "Result" (結果) 欄位**。
 
-**針對 CTI/SGS 報告的欄位陷阱：**
-- 表格可能會黏在一起，例如 "Pb 10 N.D." (10 是 MDL，N.D. 才是結果)。
-- 請優先找尋 "N.D." 或 "Negative" 或 具體數值。
-- 若有多個數字，通常 **最後一個** 或 **數值較大** 的那個不是結果(通常是限值)，請仔細依據表頭判斷。
+**針對 CTI (華測) 等複雜表格的導航指南：**
+- 這些報告的表格通常是一行一行列出的。
+- 格式常為：[化學品名稱] ... [單位] ... [MDL] ... [**Result**]
+- **秘訣**：請尋找該行 **最後出現的** "N.D." 或 "Negative"。
+- **秘訣**：如果該行有多個數字，Result 通常是**不是** 2, 5, 10, 100, 1000 (這些通常是 MDL 或 Limit) 的那個數字。
+- 請仔細區分 "Pb" (Lead) 和 "PBBs" (多溴聯苯)，不要混淆。
 
-**關鍵字對應 (忽略大小寫):**
+**關鍵字對應 (Case Insensitive):**
 - Pb: Lead, 鉛
 - Cd: Cadmium, 鎘
 - CrVI: Hexavalent Chromium, Cr(VI), 六價鉻
-- PBBs / PBDEs: 請列出該類別下所有子項目的結果。
+- PBBs / PBDEs: 請列出該類別下所有子項目的結果清單。
 
 === 3. 輸出 JSON 格式 ===
 {{
@@ -142,7 +147,7 @@ def parse_with_ai(text):
 """
 
     try:
-        # 優先使用 gpt-4o-mini (更聰明、更便宜、更適合讀複雜表格)
+        # 使用 gpt-4o-mini，它是目前讀表格最強且便宜的模型
         model_to_use = "gpt-4o-mini"
         
         response = client.chat.completions.create(
@@ -153,7 +158,7 @@ def parse_with_ai(text):
         )
         return json.loads(response.choices[0].message.content)
     except Exception:
-        # Fallback 到 gpt-3.5-turbo
+        # Fallback
         try:
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo", 
@@ -231,9 +236,9 @@ def compare_and_pick_best(current_best, new_val, file_name):
 # =====================
 # 6. Streamlit UI
 # =====================
-st.set_page_config(page_title="SGS/CTI 報告彙總系統 v6.0", layout="wide")
-st.title("🧪 第三方檢測報告自動彙總系統 v6.0")
-st.info("已更新：PFAS 鎖定 'Test Requested' 判讀，並強化 CTI 表格數值抓取。")
+st.set_page_config(page_title="SGS/CTI 報告彙總系統 v7.0", layout="wide")
+st.title("🧪 第三方檢測報告自動彙總系統 v7.0")
+st.info("已更新：支援 Intertek 'Test Conducted' 判讀，並強化 CTI 數值抓取。")
 
 uploaded_files = st.file_uploader("請上傳 PDF 報告", type="pdf", accept_multiple_files=True)
 
@@ -288,7 +293,7 @@ if uploaded_files:
             pbde_res = calculate_sum(ai_data.get("pbdes_list", []))
             final_results["PBDEs"] = compare_and_pick_best(final_results["PBDEs"], pbde_res, safe_filename)
 
-            # PFAS (若 Test Requested 有提到，顯示 REPORT)
+            # PFAS (若 Test Requested / Conducted 有提到，顯示 REPORT)
             if ai_data.get("pfas_detected") is True:
                 pfas_val = {"type": "report", "value": "REPORT"}
                 final_results["PFAS"] = compare_and_pick_best(final_results["PFAS"], pfas_val, safe_filename)

@@ -1,3 +1,9 @@
+# ======== ⭐⭐⭐ 最重要的一行（ASCII 問題的根因解法）⭐⭐⭐ ========
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+# =================================================================
+
 import streamlit as st
 import pdfplumber
 import pandas as pd
@@ -51,8 +57,6 @@ def extract_text(file):
                     text += f"\n--- Page {i+1} ---\n{t}"
     except:
         return ""
-
-    # ⭐ 強制 UTF-8，避免 ASCII 錯誤
     return text.encode("utf-8", "ignore").decode("utf-8")
 
 # =====================
@@ -71,77 +75,52 @@ def extract_date(text):
     return None
 
 # =====================
-# 4. AI：只找「可能的結果行」
+# 4. AI：只找可能的結果行
 # =====================
 def parse_with_ai(text):
     prompt = f"""
-請從以下第三方檢測報告中，找出「可能包含檢測結果的整行文字」。
+請找出檢測結果所在的整行文字，不要判斷數值。
 
-=== 項目 ===
-Pb, Cd, Hg, CrVI,
-DEHP, BBP, DBP, DIBP,
-F, Cl, Br, I, PFOS,
-PBBs, PBDEs
+項目：
+Pb, Cd, Hg, CrVI, DEHP, BBP, DBP, DIBP,
+F, Cl, Br, I, PFOS, PBBs, PBDEs
 
-=== 規則 ===
-- 回傳完整行文字
-- 同一項目可多行
-- 不要回 Limit / MDL
-- 不要判斷數值
+JSON 格式：
+{{ "Pb": ["Lead ... ND"], "PFAS_requested": true }}
 
-=== JSON ===
-{{
-  "Pb": ["Lead ... ND"],
-  "PBBs": ["DecaBDE ... 0.12", "OctaBDE ... ND"],
-  "PFAS_requested": true
-}}
-
-=== 內容 ===
+內容：
 {text[:16000]}
 """
-
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
     )
-
     raw = response.choices[0].message.content
-    safe = raw.encode("utf-8", "ignore").decode("utf-8")
-    return json.loads(safe)
+    return json.loads(raw.encode("utf-8", "ignore").decode("utf-8"))
 
 # =====================
 # 5. Python 規則判讀
 # =====================
 def extract_result_from_line(line):
     u = line.upper()
-
     if "NEGATIVE" in u:
         return {"type": "negative", "value": "NEGATIVE"}
-
     if "N.D" in u or re.search(r"\bND\b", u):
         return {"type": "nd", "value": "N.D."}
-
     nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", line)]
-    nums = [n for n in nums if n not in [1, 2, 5, 10, 100, 1000]]
-
+    nums = [n for n in nums if n not in [1,2,5,10,100,1000]]
     if nums:
         return {"type": "number", "value": max(nums)}
-
     return {"type": "none", "value": None}
 
-def compare_and_pick_best(current, new, file):
-    if current is None:
+def compare_and_pick_best(cur, new, file):
+    if cur is None or PRIORITY_MAP[new["type"]] > PRIORITY_MAP[cur["type"]]:
         return {**new, "file": file}
-
-    if PRIORITY_MAP[new["type"]] > PRIORITY_MAP[current["type"]]:
+    if new["type"] == "number" and new["value"] > cur["value"]:
         return {**new, "file": file}
-
-    if new["type"] == "number" and new["value"] > current["value"]:
-        return {**new, "file": file}
-
-    return current
+    return cur
 
 # =====================
 # 6. Streamlit UI
@@ -157,54 +136,34 @@ if uploaded_files:
 
     for f in uploaded_files:
         try:
-            safe_filename = f.name.encode("utf-8", "ignore").decode("utf-8")
-
+            fname = f.name.encode("utf-8","ignore").decode("utf-8")
             text = extract_text(f)
-            if not text:
-                raise ValueError("無法讀取 PDF 文字")
-
             ai_data = parse_with_ai(text)
 
             for chem, lines in ai_data.items():
                 if chem == "PFAS_requested":
-                    val = {"type": "report", "value": "REPORT"} if lines else {"type": "nd", "value": "N.D."}
-                    final_results["PFAS"] = compare_and_pick_best(final_results.get("PFAS"), val, safe_filename)
-                    continue
-
-                if not isinstance(lines, list):
-                    continue
-
-                if chem in ["PBBs", "PBDEs"]:
-                    nums = []
+                    val = {"type":"report","value":"REPORT"} if lines else {"type":"nd","value":"N.D."}
+                    final_results["PFAS"] = compare_and_pick_best(final_results.get("PFAS"), val, fname)
+                elif isinstance(lines,list):
                     for l in lines:
                         r = extract_result_from_line(l)
-                        if r["type"] == "number":
-                            nums.append(r["value"])
-                    val = {"type": "number", "value": sum(nums)} if nums else {"type": "nd", "value": "N.D."}
-                    final_results[chem] = compare_and_pick_best(final_results.get(chem), val, safe_filename)
+                        final_results[chem] = compare_and_pick_best(final_results.get(chem), r, fname)
 
-                elif chem in CHEMICAL_ITEMS:
-                    for l in lines:
-                        r = extract_result_from_line(l)
-                        final_results[chem] = compare_and_pick_best(final_results.get(chem), r, safe_filename)
-
-            date = extract_date(text)
-            if date and "DATE" not in final_results:
-                final_results["DATE"] = {"value": date}
+            d = extract_date(text)
+            if d and "DATE" not in final_results:
+                final_results["DATE"] = {"value": d}
 
         except Exception as e:
-            safe_error = str(e).encode("utf-8", "ignore").decode("utf-8")
-            errors.append({"檔案": safe_filename, "錯誤": safe_error})
+            errors.append({
+                "檔案": fname,
+                "錯誤": str(e).encode("utf-8","ignore").decode("utf-8")
+            })
 
-    row = {"ITEM": "RESULT"}
+    row = {"ITEM":"RESULT"}
     for k in ITEMS_ORDER:
-        if k in final_results and "value" in final_results[k]:
-            row[k] = final_results[k]["value"]
-        else:
-            row[k] = ""
+        row[k] = final_results.get(k,{}).get("value","")
 
-    df = pd.DataFrame([row])
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(pd.DataFrame([row]), use_container_width=True)
 
     if errors:
         st.warning("⚠️ 以下檔案解析失敗（不影響其他檔案）")

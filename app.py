@@ -7,13 +7,13 @@ import json
 from openai import OpenAI
 
 # =====================
-# 基本設定與 Client 初始化
+# 基本設定
 # =====================
-# 嘗試讀取 API Key
+# 嘗試讀取 API Key (支援 Secrets 與 環境變數)
 api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
 if not api_key:
-    st.error("未設定 OpenAI API Key。請在 Streamlit Secrets 或環境變數中設定。")
+    st.error("❌ 未偵測到 API Key！請確認 Streamlit Secrets 設定。")
     st.stop()
 
 client = OpenAI(api_key=api_key)
@@ -27,7 +27,7 @@ ITEMS = [
 PRIORITY = {"number": 3, "negative": 2, "nd": 1, "report": 1, "none": 0}
 
 # =====================
-# PDF 文字擷取 (安全版)
+# PDF 文字擷取 (安全模式)
 # =====================
 def extract_text(file):
     text = ""
@@ -37,19 +37,17 @@ def extract_text(file):
                 t = p.extract_text()
                 if t:
                     text += t + "\n"
-    except Exception as e:
-        # 這裡不丟出錯誤，而是回傳空字串讓後續處理，避免直接崩潰
-        return ""
+    except Exception:
+        return ""  # 讀取失敗回傳空字串，防止崩潰
         
     if not text.strip():
-        # 如果抓不到字，回傳空字串
         return ""
 
-    # [關鍵]：強制濾掉亂碼，確保回傳的是乾淨的 UTF-8 字串
+    # [關鍵修正] 強制濾掉亂碼，確保回傳的是乾淨的 UTF-8 字串
     return text.encode("utf-8", "ignore").decode("utf-8")
 
 # =====================
-# DATE 擷取
+# 日期擷取
 # =====================
 def extract_date(text):
     patterns = [
@@ -63,13 +61,13 @@ def extract_date(text):
     return None
 
 # =====================
-# AI 解析
+# AI 解析核心
 # =====================
 def parse_with_ai(text):
     if not text:
         return {}
 
-    # 限制文字長度
+    # 限制文字長度，避免 Token 爆炸
     truncated_text = text[:3500] 
     
     prompt = f"""
@@ -130,21 +128,27 @@ PFOS
         return {}
 
 # =====================
-# 正規化與邏輯處理
+# 資料正規化
 # =====================
 def normalize(val):
     if val is None:
         return {"type": "none", "value": None}
     
+    # 處理 PFAS 報告標記
     if isinstance(val, dict) and val.get("type") == "report":
         return val
 
     v = str(val).strip().upper()
-    if v in ["ND", "N.D.", "NOT DETECTED", "<MDL", "<RL"]:
+    
+    # 常見的 ND 變體
+    if v in ["ND", "N.D.", "NOT DETECTED", "<MDL", "<RL", "ABSENT"]:
         return {"type": "nd", "value": "N.D."}
+    
     if v == "NEGATIVE":
         return {"type": "negative", "value": "NEGATIVE"}
+        
     try:
+        # 移除非數字字元 (例如單位 mg/kg)
         clean_v = re.sub(r"[^\d\.]", "", v)
         return {"type": "number", "value": float(clean_v)}
     except:
@@ -175,12 +179,13 @@ def pick_best(old, new):
     if new_p > old_p:
         return new
     if new["type"] == "number" and old["type"] == "number":
+        # 如果都是數字，取數值較大的 (較保守的風險評估)
         if new["value"] > old["value"]:
             return new
     return old
 
 # =====================
-# Streamlit UI
+# Streamlit 主程式
 # =====================
 st.set_page_config(page_title="RoHS / PFAS Parser", layout="wide")
 st.title("第三方檢測報告自動彙總系統")
@@ -193,36 +198,36 @@ if files:
     date_result = ""
     errors = []
 
-    # 使用 Status 容器顯示進度
+    # 使用 Status 顯示進度，避免畫面凍結
     with st.status("正在分析報告...", expanded=True) as status:
         for f in files:
-            # 1. 檔名清洗：這是最常出錯的地方，我們強制把它轉成安全字串
-            # 如果檔名有無法編碼的字，就用 'unknown_file' 代替，防止系統崩潰
+            # === 防呆措施 1: 檔名清洗 ===
+            # 如果檔名有怪字，直接換成 safe_name，避免系統報錯
             try:
                 safe_filename = f.name.encode("utf-8", "ignore").decode("utf-8")
             except:
-                safe_filename = "unknown_filename.pdf"
+                safe_filename = "unknown_file.pdf"
                 
             st.write(f"正在處理: {safe_filename}")
             
             try:
-                # 2. 讀取文字
+                # 1. 讀取 PDF
                 text = extract_text(f)
-                
                 if not text:
-                    raise ValueError("無法讀取 PDF 文字 (可能是圖片掃描檔)")
+                    # 如果是圖片掃描檔，文字會是空的
+                    raise ValueError("無法讀取文字 (可能是圖片或加密)")
 
-                # 3. 擷取日期
+                # 2. 抓日期
                 date = extract_date(text)
                 if date and not date_result:
                     date_result = date
 
-                # 4. AI 解析
+                # 3. AI 分析
                 ai = parse_with_ai(text)
                 if not ai:
-                    raise ValueError("AI 無法解析內容")
+                    raise ValueError("AI 回傳空白結果")
 
-                # 5. 彙整結果
+                # 4. 整合數據
                 # 一般項目
                 for k, v in ai.get("items", {}).items():
                     if k in ITEMS:
@@ -248,22 +253,20 @@ if files:
                     results["PFAS"] = pick_best(results["PFAS"], pfas_res)
 
             except Exception as e:
-                # 這裡也要防呆，確保錯誤訊息不會包含亂碼
-                try:
-                    error_msg = str(e)
-                except:
-                    error_msg = "未知錯誤 (編碼異常)"
-                
-                errors.append({"檔案": safe_filename, "錯誤原因": error_msg})
-                # 注意：這裡刪除了 print()，避免後台編碼錯誤
+                # === 防呆措施 2: 錯誤處理 ===
+                # 這裡不使用 print，只記錄到 errors 列表
+                # 並確保錯誤訊息也是乾淨的字串
+                err_msg = str(e).encode("utf-8", "ignore").decode("utf-8")
+                errors.append({"檔案": safe_filename, "錯誤原因": err_msg})
 
         status.update(label="分析完成", state="complete", expanded=False)
 
+    # 抓取 Pb 的來源檔案當作代表檔名
     if results["Pb"] and results["Pb"].get("file"):
         pb_source = results["Pb"]["file"]
 
     # =====================
-    # 顯示結果
+    # 顯示結果表格
     # =====================
     st.subheader("彙總結果")
 
@@ -280,6 +283,7 @@ if files:
 
     st.dataframe(pd.DataFrame([row]), use_container_width=True)
 
+    # 如果有錯誤，顯示在下方
     if errors:
         st.subheader("⚠️ 解析失敗的檔案")
         st.dataframe(pd.DataFrame(errors), use_container_width=True)

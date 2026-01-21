@@ -57,6 +57,12 @@ def extract_date(text):
 # =====================
 # AI 解析
 # =====================
+import openai
+import os
+import json
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
 def parse_with_ai(text):
     prompt = f"""
 你是一位第三方檢測實驗室的資深工程師。
@@ -101,13 +107,15 @@ PFOS
 {text}
 """
 
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}],
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
         temperature=0
     )
 
-    return json.loads(resp.choices[0].message.content)
+    return json.loads(response.choices[0].message["content"])
 
 # =====================
 # 正規化
@@ -205,4 +213,5 @@ if files:
     if errors:
         st.subheader("⚠️ 解析失敗的檔案")
         st.dataframe(pd.DataFrame(errors), use_container_width=True)
+
 

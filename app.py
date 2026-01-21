@@ -4,7 +4,11 @@ import pandas as pd
 import re
 import os
 import json
-from openai import OpenAI
+import openai
+import os
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
 
 # =====================
 # OpenAI Client
@@ -201,3 +205,4 @@ if files:
     if errors:
         st.subheader("⚠️ 解析失敗的檔案")
         st.dataframe(pd.DataFrame(errors), use_container_width=True)
+

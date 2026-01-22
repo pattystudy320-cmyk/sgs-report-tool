@@ -4,83 +4,108 @@ import json
 import re
 import pandas as pd
 import pymupdf4llm
-import requests  # 改用這個直接發送請求
+import requests
 import tempfile
 
 # ==========================================
-# 1. 核心功能 (直接連線版 - 繞過套件問題)
+# 1. 核心功能 (智慧型自動偵測模型)
 # ==========================================
-def analyze_report_direct(api_key, text, filename):
-    # Google Gemini API 的直接連線網址
-    # 我們指定使用 gemini-1.5-flash，這是您帳號確認有的模型
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+def get_valid_model(api_key):
+    """
+    自動詢問 Google 帳號可用的模型，並回傳最適合的一個。
+    """
+    # 嘗試查詢模型列表 (使用 v1beta 以獲得最新列表)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+            
+            # 優先順序策略
+            # 1. 嘗試找 1.5 Flash (速度快、免費額度高)
+            for m in models:
+                if 'gemini-1.5-flash' in m and 'latest' not in m and 'exp' not in m:
+                    return m, "v1beta" # Flash 通常在 beta 比較新
+            
+            # 2. 嘗試找 1.5 Pro
+            for m in models:
+                if 'gemini-1.5-pro' in m and 'latest' not in m:
+                    return m, "v1beta"
+
+            # 3. 保底使用最穩定的 1.0 Pro
+            for m in models:
+                if 'gemini-pro' in m or 'gemini-1.0-pro' in m:
+                    return m, "v1" # Pro 在 v1 最穩定
+            
+            # 4. 如果都沒找到，隨便回傳第一個
+            if models:
+                return models[0], "v1beta"
+                
+    except Exception as e:
+        print(f"模型列表查詢失敗: {e}")
     
-    # 準備給 AI 的指令
+    # 如果查詢失敗，回傳一個最保守的預設值
+    return "models/gemini-1.0-pro", "v1"
+
+def analyze_report_smart(api_key, text, filename):
+    # 第一步：自動取得可用模型
+    model_name, api_version = get_valid_model(api_key)
+    
+    # 確保模型名稱格式正確 (移除 models/ 前綴以免重複)
+    clean_model_name = model_name.replace("models/", "")
+    
+    # 建立連線網址
+    url = f"https://generativelanguage.googleapis.com/{api_version}/models/{clean_model_name}:generateContent?key={api_key}"
+    
+    # 提示詞
     prompt = f"""
-    You are a data extraction assistant. 
-    Extract chemical test results from the document "{filename}".
+    You are a data extraction assistant. Extract data from the document "{filename}".
+    Return ONLY valid JSON. No Markdown. No explanations.
     
-    Output Requirements:
-    1. Return ONLY a valid JSON object.
-    2. Do NOT use Markdown code blocks (no ```json).
-    3. Do NOT include any explanation text.
-    
-    Data to Extract (use exact keys):
-    - "Pb", "Cd", "Hg", "Cr6" (value or "N.D." or "NEGATIVE")
-    - "PBBs", "PBDEs" (Sum of sub-items. If all ND, return "N.D.")
-    - "DEHP", "BBP", "DBP", "DIBP" (value or "N.D.")
-    - "F", "Cl", "Br", "I" (value or "N.D.")
-    - "PFOS" (value or "N.D.")
-    - "PFAS_Status" (Set to "REPORT" ONLY if "PFAS" keyword is in 'Test Requested'. Else null)
+    Extract these exact keys:
+    - "Pb", "Cd", "Hg", "Cr6", "PBBs", "PBDEs", "DEHP", "BBP", "DBP", "DIBP" (Value or "N.D.")
+    - "F", "Cl", "Br", "I", "PFOS" (Value or "N.D.")
+    - "PFAS_Status" ("REPORT" if keyword "PFAS" found in request list, else null)
     - "DATE" (YYYY-MM-DD)
 
-    Document Content:
-    {text[:30000]}
+    Content:
+    {text[:28000]}
     """
 
-    # 封裝資料封包
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
-    
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     headers = {'Content-Type': 'application/json'}
 
     try:
-        # 直接發送 POST 請求
         response = requests.post(url, headers=headers, json=payload)
         
-        # 檢查是否連線成功
         if response.status_code != 200:
-            st.error(f"❌ Google API 連線錯誤 ({response.status_code}): {response.text}")
+            # 如果失敗，顯示詳細錯誤以便除錯
+            st.error(f"❌ API Error ({clean_model_name}): {response.text}")
             return None
             
-        # 解析回傳的資料
-        result_json = response.json()
+        result = response.json()
         
-        # 提取文字內容
+        # 嘗試解析
         try:
-            raw_text = result_json['candidates'][0]['content']['parts'][0]['text']
-        except (KeyError, IndexError):
-            st.error("❌ AI 回傳了無法解析的格式，可能是內容被 Google 阻擋。")
+            raw_text = result['candidates'][0]['content']['parts'][0]['text']
+        except:
+            st.error("❌ 無法讀取 AI 回傳內容，可能是內容被 Google 安全過濾攔截。")
             return None
 
-        # 清理 Markdown 標記
+        # 清理 JSON
         raw_text = raw_text.strip()
-        if "```json" in raw_text:
-            raw_text = raw_text.replace("```json", "").replace("```", "")
-        elif "```" in raw_text:
-            raw_text = raw_text.replace("```", "")
+        if "```json" in raw_text: raw_text = raw_text.replace("```json", "").replace("```", "")
+        elif "```" in raw_text: raw_text = raw_text.replace("```", "")
             
         return json.loads(raw_text)
 
     except Exception as e:
-        st.error(f"❌ 解析失敗 ({filename}): {e}")
+        st.error(f"❌ 處理失敗: {e}")
         return None
 
 # ==========================================
-# 2. 輔助功能 (無需變動)
+# 2. 輔助功能
 # ==========================================
 def get_score(value):
     if not value: return 0
@@ -90,11 +115,9 @@ def get_score(value):
     if "NEG" in v: return 2
     try:
         match = re.search(r"[-+]?\d*\.\d+|\d+", v)
-        if match:
-            return 100 + float(match.group())
+        if match: return 100 + float(match.group())
         return 0
-    except:
-        return 0
+    except: return 0
 
 def merge_results(results_list):
     if not results_list: return None, ""
@@ -136,21 +159,25 @@ def merge_results(results_list):
 # ==========================================
 # 3. Streamlit 介面
 # ==========================================
-st.set_page_config(page_title="通用檢測報告擷取 (直連版)", layout="wide")
-st.title("🧪 通用型第三方檢測報告擷取工具 (直連版)")
-st.markdown("支援 SGS, CTI, Intertek 格式。採用 Direct HTTP Request 繞過環境限制。")
+st.set_page_config(page_title="檢測報告擷取 (智慧偵測版)", layout="wide")
+st.title("🧪 通用型第三方檢測報告擷取工具 (智慧偵測版)")
+st.markdown("自動偵測可用模型，解決 404 錯誤。")
 
 with st.sidebar:
     st.header("設定")
     api_key = st.text_input("請輸入 Google AI Studio API Key", type="password")
 
-uploaded_files = st.file_uploader("請上傳 PDF 報告 (可多選)", type=["pdf"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("請上傳 PDF 報告", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files and api_key:
     if st.button("開始分析", type="primary"):
         processed_files = []
         progress_bar = st.progress(0)
         status_text = st.empty()
+        
+        # 測試連線並顯示目前使用的模型
+        test_model, test_ver = get_valid_model(api_key)
+        st.toast(f"已連線至模型: {test_model} ({test_ver})")
         
         for i, uploaded_file in enumerate(uploaded_files):
             status_text.text(f"正在讀取: {uploaded_file.name} ...")
@@ -163,8 +190,7 @@ if uploaded_files and api_key:
                 if len(md_text) < 50:
                     st.warning(f"⚠️ {uploaded_file.name} 內容過少，跳過。")
                 else:
-                    # 使用直連函式
-                    result = analyze_report_direct(api_key, md_text, uploaded_file.name)
+                    result = analyze_report_smart(api_key, md_text, uploaded_file.name)
                     if result:
                         processed_files.append({"filename": uploaded_file.name, "data": result})
             finally:
@@ -189,7 +215,6 @@ if uploaded_files and api_key:
             
             cols = ["ITEM", "Pb", "Cd", "Hg", "Cr+6", "PBBs", "PBDEs", "DEHP", "BBP", 
                     "DBP", "DIBP", "F", "Cl", "Br", "I", "PFOS", "PFAS", "DATE", "FILE NAME"]
-            
             df = pd.DataFrame([table_row])
             for c in cols:
                 if c not in df.columns: df[c] = ""

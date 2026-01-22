@@ -9,18 +9,23 @@ import tempfile
 import time
 
 # ==========================================
-# 1. 核心功能 (自動切換模型版)
+# 1. 核心功能 (精準版號輪詢)
 # ==========================================
-def analyze_report_fallback(api_key, text, filename):
+def analyze_report_final(api_key, text, filename):
     
-    # 定義我們要嘗試的「模型策略清單」
-    # 順序：優先用額度高且穩定的 1.5 Flash (v1) -> 失敗則試 v1beta -> 再失敗試 1.0 Pro
+    # 這是根據您截圖(圖4)中顯示的確切模型清單
+    # 我們不猜簡稱，直接打全名，並搭配對應的 API 版本
     strategy_list = [
-        ("gemini-1.5-flash", "v1"),          # 策略1: 1.5 Flash 正式版 (最穩)
-        ("gemini-1.5-flash", "v1beta"),      # 策略2: 1.5 Flash 測試版
-        ("gemini-1.5-flash-latest", "v1beta"), # 策略3: 1.5 Flash 最新版
-        ("gemini-1.5-pro", "v1beta"),        # 策略4: 1.5 Pro (如果有額度)
-        ("gemini-1.0-pro", "v1")             # 策略5: 舊版 Pro (保底)
+        # 策略 1: 1.5 Flash 002 版 (通常最新最穩)
+        ("gemini-1.5-flash-002", "v1beta"),
+        # 策略 2: 1.5 Flash 001 版 (舊一點但很穩)
+        ("gemini-1.5-flash-001", "v1beta"),
+        # 策略 3: 1.5 Flash 8b (輕量版，速度快)
+        ("gemini-1.5-flash-8b", "v1beta"),
+        # 策略 4: 1.5 Pro 002 (如果 Flash 都不行，試試 Pro)
+        ("gemini-1.5-pro-002", "v1beta"),
+        # 策略 5: 簡稱備用
+        ("gemini-1.5-flash", "v1beta"),
     ]
 
     prompt = f"""
@@ -34,7 +39,7 @@ def analyze_report_fallback(api_key, text, filename):
     - "DATE" (YYYY-MM-DD)
 
     Content:
-    {text[:30000]}
+    {text[:28000]}
     """
     
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -47,12 +52,12 @@ def analyze_report_fallback(api_key, text, filename):
         url = f"https://generativelanguage.googleapis.com/{version}/models/{model_name}:generateContent?key={api_key}"
         
         try:
-            # 顯示目前正在嘗試的模型 (方便除錯)
-            print(f"Trying {model_name} ({version})...") 
+            # 在介面上顯示目前嘗試的模型，讓您知道進度
+            print(f"嘗試連線: {model_name}...") 
             
             response = requests.post(url, headers=headers, json=payload)
             
-            # 情況 A: 成功 (200)
+            # --- 情況 A: 成功 (200) ---
             if response.status_code == 200:
                 result = response.json()
                 try:
@@ -62,20 +67,23 @@ def analyze_report_fallback(api_key, text, filename):
                     if raw_text.startswith("```json"): raw_text = raw_text[7:]
                     if raw_text.endswith("```"): raw_text = raw_text[:-3]
                     
-                    st.toast(f"✅ 使用模型成功: {model_name} ({version})")
+                    # 成功了！跳出迴圈回傳結果
                     return json.loads(raw_text)
-                except:
-                    continue # 解析失敗，換下一個
+                except Exception as e:
+                    last_error = f"解析錯誤: {e}"
+                    continue # 內容解析失敗，換下一個
 
-            # 情況 B: 額度不足 (429) -> 休息一下再試同一個，或跳過
+            # --- 情況 B: 額度不足 (429) ---
             elif response.status_code == 429:
                 last_error = f"429 Quota Exceeded ({model_name})"
-                time.sleep(2) # 稍微休息
-                continue # 換下一個模型試試
+                # 如果是 429，代表模型存在但忙碌，我們可以休息一下重試一次
+                time.sleep(2)
+                # 這裡不重試同一個了，直接換下一個比較保險
+                continue 
 
-            # 情況 C: 找不到模型 (404) -> 直接換下一個
+            # --- 情況 C: 找不到模型 (404) ---
             elif response.status_code == 404:
-                last_error = f"404 Not Found ({model_name} on {version})"
+                last_error = f"404 Not Found ({model_name})"
                 continue
 
             else:
@@ -145,9 +153,9 @@ def merge_results(results_list):
 # ==========================================
 # 3. Streamlit 介面
 # ==========================================
-st.set_page_config(page_title="檢測報告擷取 (自動切換版)", layout="wide")
-st.title("🧪 通用型第三方檢測報告擷取工具 (自動切換版)")
-st.markdown("自動輪詢 Gemini 1.5 Flash (v1/v1beta) 與 1.0 Pro，確保連線成功。")
+st.set_page_config(page_title="檢測報告擷取 (精準版號)", layout="wide")
+st.title("🧪 通用型第三方檢測報告擷取工具 (精準版號版)")
+st.markdown("自動輪詢 gemini-1.5-flash-001/002/8b，確保連線成功。")
 
 with st.sidebar:
     st.header("設定")
@@ -164,7 +172,7 @@ if uploaded_files and api_key:
         for i, uploaded_file in enumerate(uploaded_files):
             status_text.text(f"正在讀取: {uploaded_file.name} ...")
             
-            # 避免觸發速率限制
+            # 避免瞬間請求過多 (Rate Limit)
             if i > 0: time.sleep(1) 
             
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
@@ -176,8 +184,8 @@ if uploaded_files and api_key:
                 if len(md_text) < 50:
                     st.warning(f"⚠️ {uploaded_file.name} 內容過少，跳過。")
                 else:
-                    # 使用自動切換函式
-                    result = analyze_report_fallback(api_key, md_text, uploaded_file.name)
+                    # 使用精準版號函式
+                    result = analyze_report_final(api_key, md_text, uploaded_file.name)
                     if result:
                         processed_files.append({"filename": uploaded_file.name, "data": result})
             finally:
@@ -212,7 +220,7 @@ if uploaded_files and api_key:
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 下載 Excel (CSV)", csv, 'report_summary.csv', 'text/csv')
         else:
-            st.error("❌ 無數據或所有模型皆失敗。")
+            st.error("❌ 無數據或發生錯誤。")
 
 elif not api_key:
     st.info("請在左側輸入 Google API Key。")

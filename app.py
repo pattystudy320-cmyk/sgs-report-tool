@@ -8,14 +8,14 @@ import google.generativeai as genai
 import tempfile
 
 # ==========================================
-# 1. 核心功能 (最純粹的文字模式)
+# 1. 核心功能 (最純粹的文字模式 - 高相容版)
 # ==========================================
 def analyze_report_with_gemini(api_key, text, filename):
     try:
         genai.configure(api_key=api_key)
         
-        # 使用您列表中確認存在的模型名稱
-        # 這裡不加任何 -latest 後綴，直接用標準名稱
+        # 使用您列表上確認存在的模型名稱
+        # 不使用 -latest，直接用標準名稱
         model = genai.GenerativeModel('gemini-1.5-flash')
 
         # 提示詞：明確要求純 JSON 字串
@@ -41,13 +41,14 @@ def analyze_report_with_gemini(api_key, text, filename):
         {text[:30000]}
         """
 
-        # 重點：完全不設定 generation_config，避免觸發 API 版本錯誤
+        # 重點修正：完全移除 generation_config
+        # 這能避開 API 版本不支援 JSON Mode 的錯誤
         response = model.generate_content(prompt)
         
         # 手動清理回傳的文字 (AI 有時候還是會雞婆加 Markdown)
         raw_text = response.text.strip()
         
-        # 移除可能的 Markdown 標記
+        # 移除可能的 Markdown 標記，確保是純 JSON
         if "```json" in raw_text:
             raw_text = raw_text.replace("```json", "").replace("```", "")
         elif "```" in raw_text:
@@ -119,7 +120,7 @@ def merge_results(results_list):
 # ==========================================
 # 3. Streamlit 介面
 # ==========================================
-st.set_page_config(page_title="通用檢測報告擷取 (純文字模式)", layout="wide")
+st.set_page_config(page_title="通用檢測報告擷取 (兼容模式)", layout="wide")
 st.title("🧪 通用型第三方檢測報告擷取工具 (兼容模式)")
 st.markdown("支援 SGS, CTI, Intertek 格式。已切換至高相容性模式。")
 

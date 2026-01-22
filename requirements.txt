@@ -1,4 +1,5 @@
 streamlit
-pdfplumber
+openai
+pymupdf4llm
+pydantic
 pandas
-openai>=1.0.0

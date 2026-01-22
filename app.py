@@ -8,66 +8,56 @@ import google.generativeai as genai
 import tempfile
 
 # ==========================================
-# 1. 核心功能 (Google Gemini)
+# 1. 核心功能 (高相容性 Gemini 設定)
 # ==========================================
 def analyze_report_with_gemini(api_key, text, filename):
     try:
         genai.configure(api_key=api_key)
         
-        # 優先嘗試 Flash 模型，這是目前性價比最高的
-        # 如果您的帳號較舊，可能需要改用 gemini-pro
-        model_name = 'gemini-1.5-flash' 
-        model = genai.GenerativeModel(model_name)
+        # 使用您列表上有出現的穩定版本
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
-        response_schema = {
-            "type": "object",
-            "properties": {
-                "Pb": {"type": "string"}, "Cd": {"type": "string"}, "Hg": {"type": "string"},
-                "Cr6": {"type": "string"}, "PBBs": {"type": "string"}, "PBDEs": {"type": "string"},
-                "DEHP": {"type": "string"}, "BBP": {"type": "string"}, "DBP": {"type": "string"},
-                "DIBP": {"type": "string"}, "F": {"type": "string"}, "Cl": {"type": "string"},
-                "Br": {"type": "string"}, "I": {"type": "string"}, "PFOS": {"type": "string"},
-                "PFAS_Status": {"type": "string"}, "DATE": {"type": "string"}
-            }
-        }
-
+        # 這裡改用純文字提示，不使用導致錯誤的 response_schema
         prompt = f"""
-        Analyze the chemical test report in Markdown below from "{filename}". Extract data to JSON.
-        Rules:
-        1. "ND", "N.D.", "< MDL" -> "N.D."
-        2. Cr(VI) "Negative" -> "NEGATIVE"
-        3. PBBs/PBDEs: Sum sub-items. If all ND, return "N.D."
-        4. PFAS: "REPORT" only if exact "PFAS" keyword in requested list. Else null.
-        5. Date: YYYY-MM-DD format.
-        
-        Content:
-        {text[:30000]} 
-        """
-        # 注意：限制字數避免超過 token 上限 (雖然 Flash 額度很高，但安全起見)
+        You are a chemical test report parser. Extract data from the following file: "{filename}".
+        Return the result **ONLY** as a valid JSON object. Do not add Markdown formatting (```json ... ```).
 
+        ### Data to Extract (JSON Keys):
+        - "Pb", "Cd", "Hg", "Cr6" (value or "N.D." or "NEGATIVE")
+        - "PBBs", "PBDEs" (Sum of sub-items. If all ND, return "N.D.")
+        - "DEHP", "BBP", "DBP", "DIBP" (value or "N.D.")
+        - "F", "Cl", "Br", "I" (value or "N.D.")
+        - "PFOS" (value or "N.D.")
+        - "PFAS_Status" (Set to "REPORT" ONLY if "PFAS" keyword is explicitly in 'Test Requested'. Else null)
+        - "DATE" (YYYY-MM-DD)
+
+        ### Content:
+        {text[:30000]}
+        """
+
+        # 設定回傳格式為 JSON (這是通用的設定，比 Schema 穩定)
         response = model.generate_content(
             prompt,
             generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema
+                response_mime_type="application/json"
             )
         )
-        return json.loads(response.text)
+        
+        # 清理回傳的文字 (以防 AI 加了 ```json)
+        raw_text = response.text.strip()
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]
+            
+        return json.loads(raw_text)
 
     except Exception as e:
-        st.error(f"❌ 解析失敗: {e}")
-        # 如果失敗，嘗試列出可用的模型，幫助除錯
-        try:
-            st.warning("正在嘗試列出您帳號可用的模型...")
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    st.write(f"- {m.name}")
-        except:
-            st.error("無法列出模型，請檢查 API Key 是否正確。")
+        st.error(f"❌ 解析失敗 ({filename}): {e}")
         return None
 
 # ==========================================
-# 2. 輔助功能
+# 2. 輔助功能 (無需變動)
 # ==========================================
 def get_score(value):
     if not value: return 0
@@ -121,14 +111,13 @@ def merge_results(results_list):
 # ==========================================
 # 3. Streamlit 介面
 # ==========================================
-st.set_page_config(page_title="通用檢測報告擷取 (Gemini版)", layout="wide")
-st.title("🧪 通用型第三方檢測報告擷取工具 (Google Gemini版)")
-st.markdown("支援 SGS, CTI, Intertek 格式。")
+st.set_page_config(page_title="通用檢測報告擷取 (Gemini穩定版)", layout="wide")
+st.title("🧪 通用型第三方檢測報告擷取工具 (Google Gemini穩定版)")
+st.markdown("支援 SGS, CTI, Intertek 格式。已修復 404 Model Error。")
 
 with st.sidebar:
     st.header("設定")
     api_key = st.text_input("請輸入 Google AI Studio API Key", type="password")
-    st.info("請確保 API Key 有效且未過期。")
 
 uploaded_files = st.file_uploader("請上傳 PDF 報告 (可多選)", type=["pdf"], accept_multiple_files=True)
 
@@ -183,7 +172,7 @@ if uploaded_files and api_key:
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 下載 Excel (CSV)", csv, 'report_summary.csv', 'text/csv')
         else:
-            st.error("❌ 無數據或發生錯誤，請查看上方警告訊息。")
+            st.error("❌ 無數據或發生錯誤。")
 
 elif not api_key:
     st.info("請在左側輸入 Google API Key。")

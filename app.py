@@ -8,104 +8,84 @@ import requests
 import tempfile
 
 # ==========================================
-# 1. 核心功能 (智慧型自動偵測模型)
+# 1. 核心功能 (鎖定 Gemini 2.0 Flash + v1beta)
 # ==========================================
-def get_valid_model(api_key):
-    """
-    自動詢問 Google 帳號可用的模型，並回傳最適合的一個。
-    """
-    # 嘗試查詢模型列表 (使用 v1beta 以獲得最新列表)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-            
-            # 優先順序策略
-            # 1. 嘗試找 1.5 Flash (速度快、免費額度高)
-            for m in models:
-                if 'gemini-1.5-flash' in m and 'latest' not in m and 'exp' not in m:
-                    return m, "v1beta" # Flash 通常在 beta 比較新
-            
-            # 2. 嘗試找 1.5 Pro
-            for m in models:
-                if 'gemini-1.5-pro' in m and 'latest' not in m:
-                    return m, "v1beta"
-
-            # 3. 保底使用最穩定的 1.0 Pro
-            for m in models:
-                if 'gemini-pro' in m or 'gemini-1.0-pro' in m:
-                    return m, "v1" # Pro 在 v1 最穩定
-            
-            # 4. 如果都沒找到，隨便回傳第一個
-            if models:
-                return models[0], "v1beta"
-                
-    except Exception as e:
-        print(f"模型列表查詢失敗: {e}")
+def analyze_report_direct(api_key, text, filename):
+    # 這裡直接指定您的帳號支援的最新模型：gemini-2.0-flash
+    # 並且強制使用 v1beta 接口
+    model_name = "gemini-2.0-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     
-    # 如果查詢失敗，回傳一個最保守的預設值
-    return "models/gemini-1.0-pro", "v1"
-
-def analyze_report_smart(api_key, text, filename):
-    # 第一步：自動取得可用模型
-    model_name, api_version = get_valid_model(api_key)
-    
-    # 確保模型名稱格式正確 (移除 models/ 前綴以免重複)
-    clean_model_name = model_name.replace("models/", "")
-    
-    # 建立連線網址
-    url = f"https://generativelanguage.googleapis.com/{api_version}/models/{clean_model_name}:generateContent?key={api_key}"
-    
-    # 提示詞
+    # 提示詞 (Prompt)
     prompt = f"""
-    You are a data extraction assistant. Extract data from the document "{filename}".
-    Return ONLY valid JSON. No Markdown. No explanations.
+    You are a chemical test report parser. 
+    Task: Extract specific data from the document "{filename}" into JSON format.
     
-    Extract these exact keys:
-    - "Pb", "Cd", "Hg", "Cr6", "PBBs", "PBDEs", "DEHP", "BBP", "DBP", "DIBP" (Value or "N.D.")
-    - "F", "Cl", "Br", "I", "PFOS" (Value or "N.D.")
-    - "PFAS_Status" ("REPORT" if keyword "PFAS" found in request list, else null)
+    ### Extraction Rules:
+    1. **Output ONLY JSON**. No Markdown (```json), no intro text.
+    2. **Value Standardization**:
+       - "ND", "N.D.", "< MDL", "Not Detected" -> "N.D."
+       - "Negative" -> "NEGATIVE"
+       - Remove units (mg/kg, ppm).
+    3. **Logic**:
+       - **PBBs/PBDEs**: Sum of sub-items. If all ND, return "N.D."
+       - **PFAS_Status**: Check "Test Requested" section. ONLY if strict keyword "PFAS" or "Per- and Polyfluoroalkyl" is found, set to "REPORT". Else null.
+    
+    ### JSON Keys to Extract:
+    - "Pb", "Cd", "Hg", "Cr6"
+    - "PBBs", "PBDEs"
+    - "DEHP", "BBP", "DBP", "DIBP"
+    - "F", "Cl", "Br", "I"
+    - "PFOS"
+    - "PFAS_Status"
     - "DATE" (YYYY-MM-DD)
 
-    Content:
-    {text[:28000]}
+    ### Content:
+    {text[:30000]}
     """
 
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
     headers = {'Content-Type': 'application/json'}
 
     try:
+        # 發送請求
         response = requests.post(url, headers=headers, json=payload)
         
+        # 錯誤處理
         if response.status_code != 200:
-            # 如果失敗，顯示詳細錯誤以便除錯
-            st.error(f"❌ API Error ({clean_model_name}): {response.text}")
+            st.error(f"❌ API Error ({response.status_code}): {response.text}")
             return None
             
         result = response.json()
         
-        # 嘗試解析
+        # 解析內容
         try:
             raw_text = result['candidates'][0]['content']['parts'][0]['text']
-        except:
-            st.error("❌ 無法讀取 AI 回傳內容，可能是內容被 Google 安全過濾攔截。")
+        except (KeyError, IndexError):
+            st.error(f"❌ 解析失敗，AI 未回傳內容。回應: {result}")
             return None
 
-        # 清理 JSON
+        # 清理 JSON 字串
         raw_text = raw_text.strip()
-        if "```json" in raw_text: raw_text = raw_text.replace("```json", "").replace("```", "")
-        elif "```" in raw_text: raw_text = raw_text.replace("```", "")
-            
+        # 移除可能的 Markdown 標記
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]
+        
         return json.loads(raw_text)
 
     except Exception as e:
-        st.error(f"❌ 處理失敗: {e}")
+        st.error(f"❌ 處理例外狀況: {e}")
         return None
 
 # ==========================================
-# 2. 輔助功能
+# 2. 輔助功能 (無需變動)
 # ==========================================
 def get_score(value):
     if not value: return 0
@@ -159,9 +139,9 @@ def merge_results(results_list):
 # ==========================================
 # 3. Streamlit 介面
 # ==========================================
-st.set_page_config(page_title="檢測報告擷取 (智慧偵測版)", layout="wide")
-st.title("🧪 通用型第三方檢測報告擷取工具 (智慧偵測版)")
-st.markdown("自動偵測可用模型，解決 404 錯誤。")
+st.set_page_config(page_title="檢測報告擷取 (Gemini 2.0)", layout="wide")
+st.title("🧪 通用型第三方檢測報告擷取工具 (Gemini 2.0版)")
+st.markdown("使用最新 Gemini 2.0 Flash 模型 + v1beta 接口。")
 
 with st.sidebar:
     st.header("設定")
@@ -175,10 +155,6 @@ if uploaded_files and api_key:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 測試連線並顯示目前使用的模型
-        test_model, test_ver = get_valid_model(api_key)
-        st.toast(f"已連線至模型: {test_model} ({test_ver})")
-        
         for i, uploaded_file in enumerate(uploaded_files):
             status_text.text(f"正在讀取: {uploaded_file.name} ...")
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
@@ -190,7 +166,7 @@ if uploaded_files and api_key:
                 if len(md_text) < 50:
                     st.warning(f"⚠️ {uploaded_file.name} 內容過少，跳過。")
                 else:
-                    result = analyze_report_smart(api_key, md_text, uploaded_file.name)
+                    result = analyze_report_direct(api_key, md_text, uploaded_file.name)
                     if result:
                         processed_files.append({"filename": uploaded_file.name, "data": result})
             finally:
@@ -220,7 +196,7 @@ if uploaded_files and api_key:
                 if c not in df.columns: df[c] = ""
             df = df[cols]
             
-            st.success("✅ 擷取成功")
+            st.success(f"✅ 擷取成功 (Primary File: {primary_filename})")
             st.dataframe(df, hide_index=True)
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 下載 Excel (CSV)", csv, 'report_summary.csv', 'text/csv')

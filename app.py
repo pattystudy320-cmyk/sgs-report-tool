@@ -6,17 +6,18 @@ import pandas as pd
 import pymupdf4llm
 import requests
 import tempfile
+import time  # 新增時間控制
 
 # ==========================================
-# 1. 核心功能 (鎖定 Gemini 2.0 Flash + v1beta)
+# 1. 核心功能 (使用高額度 1.5 Flash + v1beta)
 # ==========================================
 def analyze_report_direct(api_key, text, filename):
-    # 這裡直接指定您的帳號支援的最新模型：gemini-2.0-flash
-    # 並且強制使用 v1beta 接口
-    model_name = "gemini-2.0-flash"
+    # 修改點：改回 gemini-1.5-flash，這是目前免費額度最慷慨的模型
+    model_name = "gemini-1.5-flash"
+    
+    # 依然使用 v1beta，因為 Flash 模型需要它
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     
-    # 提示詞 (Prompt)
     prompt = f"""
     You are a chemical test report parser. 
     Task: Extract specific data from the document "{filename}" into JSON format.
@@ -56,27 +57,26 @@ def analyze_report_direct(api_key, text, filename):
         # 發送請求
         response = requests.post(url, headers=headers, json=payload)
         
-        # 錯誤處理
+        # 429 錯誤處理 (額度不足)
+        if response.status_code == 429:
+            st.error("⏳ Google API 忙碌中 (429 Rate Limit)。請稍等幾秒再試，或是這份文件太長了。")
+            return None
+            
         if response.status_code != 200:
             st.error(f"❌ API Error ({response.status_code}): {response.text}")
             return None
             
         result = response.json()
         
-        # 解析內容
         try:
             raw_text = result['candidates'][0]['content']['parts'][0]['text']
         except (KeyError, IndexError):
             st.error(f"❌ 解析失敗，AI 未回傳內容。回應: {result}")
             return None
 
-        # 清理 JSON 字串
         raw_text = raw_text.strip()
-        # 移除可能的 Markdown 標記
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
+        if raw_text.startswith("```json"): raw_text = raw_text[7:]
+        if raw_text.endswith("```"): raw_text = raw_text[:-3]
         
         return json.loads(raw_text)
 
@@ -85,7 +85,7 @@ def analyze_report_direct(api_key, text, filename):
         return None
 
 # ==========================================
-# 2. 輔助功能 (無需變動)
+# 2. 輔助功能
 # ==========================================
 def get_score(value):
     if not value: return 0
@@ -139,9 +139,9 @@ def merge_results(results_list):
 # ==========================================
 # 3. Streamlit 介面
 # ==========================================
-st.set_page_config(page_title="檢測報告擷取 (Gemini 2.0)", layout="wide")
-st.title("🧪 通用型第三方檢測報告擷取工具 (Gemini 2.0版)")
-st.markdown("使用最新 Gemini 2.0 Flash 模型 + v1beta 接口。")
+st.set_page_config(page_title="檢測報告擷取 (1.5 Flash)", layout="wide")
+st.title("🧪 通用型第三方檢測報告擷取工具 (1.5 Flash版)")
+st.markdown("使用高額度 gemini-1.5-flash 模型，穩定性最佳。")
 
 with st.sidebar:
     st.header("設定")
@@ -157,6 +157,10 @@ if uploaded_files and api_key:
         
         for i, uploaded_file in enumerate(uploaded_files):
             status_text.text(f"正在讀取: {uploaded_file.name} ...")
+            
+            # 這裡加一個小延遲，避免瞬間請求過多被 Google 擋 (429錯誤)
+            if i > 0: time.sleep(2) 
+            
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                 tmp_file.write(uploaded_file.read())
                 tmp_path = tmp_file.name

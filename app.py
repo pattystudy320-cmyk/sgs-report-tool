@@ -16,7 +16,7 @@ def analyze_report_with_gemini(api_key, text, filename):
     genai.configure(api_key=api_key)
     
     # 使用輕量快速的 Flash 模型 (通常有免費額度)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro')
 
     # 定義輸出的 JSON 結構 (Schema)
     # 這能確保 Google 回傳電腦看得懂的格式
@@ -231,3 +231,4 @@ if uploaded_files and api_key:
 
 elif not api_key:
     st.info("請在左側輸入 Google API Key。")
+

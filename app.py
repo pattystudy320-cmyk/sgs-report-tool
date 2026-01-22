@@ -4,51 +4,70 @@ import json
 import re
 import pandas as pd
 import pymupdf4llm
-import google.generativeai as genai
+import requests  # 改用這個直接發送請求
 import tempfile
 
 # ==========================================
-# 1. 核心功能 (最純粹的文字模式 - 高相容版)
+# 1. 核心功能 (直接連線版 - 繞過套件問題)
 # ==========================================
-def analyze_report_with_gemini(api_key, text, filename):
+def analyze_report_direct(api_key, text, filename):
+    # Google Gemini API 的直接連線網址
+    # 我們指定使用 gemini-1.5-flash，這是您帳號確認有的模型
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    
+    # 準備給 AI 的指令
+    prompt = f"""
+    You are a data extraction assistant. 
+    Extract chemical test results from the document "{filename}".
+    
+    Output Requirements:
+    1. Return ONLY a valid JSON object.
+    2. Do NOT use Markdown code blocks (no ```json).
+    3. Do NOT include any explanation text.
+    
+    Data to Extract (use exact keys):
+    - "Pb", "Cd", "Hg", "Cr6" (value or "N.D." or "NEGATIVE")
+    - "PBBs", "PBDEs" (Sum of sub-items. If all ND, return "N.D.")
+    - "DEHP", "BBP", "DBP", "DIBP" (value or "N.D.")
+    - "F", "Cl", "Br", "I" (value or "N.D.")
+    - "PFOS" (value or "N.D.")
+    - "PFAS_Status" (Set to "REPORT" ONLY if "PFAS" keyword is in 'Test Requested'. Else null)
+    - "DATE" (YYYY-MM-DD)
+
+    Document Content:
+    {text[:30000]}
+    """
+
+    # 封裝資料封包
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    headers = {'Content-Type': 'application/json'}
+
     try:
-        genai.configure(api_key=api_key)
+        # 直接發送 POST 請求
+        response = requests.post(url, headers=headers, json=payload)
         
-        # 使用您列表上確認存在的模型名稱
-        # 不使用 -latest，直接用標準名稱
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 檢查是否連線成功
+        if response.status_code != 200:
+            st.error(f"❌ Google API 連線錯誤 ({response.status_code}): {response.text}")
+            return None
+            
+        # 解析回傳的資料
+        result_json = response.json()
+        
+        # 提取文字內容
+        try:
+            raw_text = result_json['candidates'][0]['content']['parts'][0]['text']
+        except (KeyError, IndexError):
+            st.error("❌ AI 回傳了無法解析的格式，可能是內容被 Google 阻擋。")
+            return None
 
-        # 提示詞：明確要求純 JSON 字串
-        prompt = f"""
-        You are a data extraction assistant. 
-        Extract chemical test results from the document "{filename}".
-        
-        Output Requirements:
-        1. Return ONLY a valid JSON object.
-        2. Do NOT use Markdown code blocks (no ```json).
-        3. Do NOT include any explanation text.
-        
-        Data to Extract (use exact keys):
-        - "Pb", "Cd", "Hg", "Cr6" (value or "N.D." or "NEGATIVE")
-        - "PBBs", "PBDEs" (Sum of sub-items. If all ND, return "N.D.")
-        - "DEHP", "BBP", "DBP", "DIBP" (value or "N.D.")
-        - "F", "Cl", "Br", "I" (value or "N.D.")
-        - "PFOS" (value or "N.D.")
-        - "PFAS_Status" (Set to "REPORT" ONLY if "PFAS" keyword is in 'Test Requested'. Else null)
-        - "DATE" (YYYY-MM-DD)
-
-        Document Content:
-        {text[:30000]}
-        """
-
-        # 重點修正：完全移除 generation_config
-        # 這能避開 API 版本不支援 JSON Mode 的錯誤
-        response = model.generate_content(prompt)
-        
-        # 手動清理回傳的文字 (AI 有時候還是會雞婆加 Markdown)
-        raw_text = response.text.strip()
-        
-        # 移除可能的 Markdown 標記，確保是純 JSON
+        # 清理 Markdown 標記
+        raw_text = raw_text.strip()
         if "```json" in raw_text:
             raw_text = raw_text.replace("```json", "").replace("```", "")
         elif "```" in raw_text:
@@ -61,7 +80,7 @@ def analyze_report_with_gemini(api_key, text, filename):
         return None
 
 # ==========================================
-# 2. 輔助功能 (邏輯維持不變)
+# 2. 輔助功能 (無需變動)
 # ==========================================
 def get_score(value):
     if not value: return 0
@@ -82,13 +101,11 @@ def merge_results(results_list):
     fields = ["Pb", "Cd", "Hg", "Cr6", "PBBs", "PBDEs", "DEHP", "BBP", "DBP", "DIBP", "F", "Cl", "Br", "I", "PFOS", "PFAS_Status", "DATE"]
     final_data = {f: "" for f in fields}
     
-    # 數值合併邏輯
     for field in fields:
         if field == "DATE": continue
         best_val = ""
         best_score = -1
         for item in results_list:
-            # 確保 key 存在，避免報錯
             val = item['data'].get(field, "")
             score = get_score(val)
             if score > best_score:
@@ -96,7 +113,6 @@ def merge_results(results_list):
                 best_val = val
         final_data[field] = best_val if best_val else ""
 
-    # 檔案選取邏輯
     best_filename = results_list[0]['filename']
     max_pb_score = -1
     max_total_score = -1
@@ -120,9 +136,9 @@ def merge_results(results_list):
 # ==========================================
 # 3. Streamlit 介面
 # ==========================================
-st.set_page_config(page_title="通用檢測報告擷取 (兼容模式)", layout="wide")
-st.title("🧪 通用型第三方檢測報告擷取工具 (兼容模式)")
-st.markdown("支援 SGS, CTI, Intertek 格式。已切換至高相容性模式。")
+st.set_page_config(page_title="通用檢測報告擷取 (直連版)", layout="wide")
+st.title("🧪 通用型第三方檢測報告擷取工具 (直連版)")
+st.markdown("支援 SGS, CTI, Intertek 格式。採用 Direct HTTP Request 繞過環境限制。")
 
 with st.sidebar:
     st.header("設定")
@@ -147,7 +163,8 @@ if uploaded_files and api_key:
                 if len(md_text) < 50:
                     st.warning(f"⚠️ {uploaded_file.name} 內容過少，跳過。")
                 else:
-                    result = analyze_report_with_gemini(api_key, md_text, uploaded_file.name)
+                    # 使用直連函式
+                    result = analyze_report_direct(api_key, md_text, uploaded_file.name)
                     if result:
                         processed_files.append({"filename": uploaded_file.name, "data": result})
             finally:
@@ -159,7 +176,6 @@ if uploaded_files and api_key:
         if processed_files:
             merged_data, primary_filename = merge_results(processed_files)
             
-            # 對應您的 Excel 格式
             table_row = {
                 "ITEM": "1",
                 "Pb": merged_data.get("Pb"), "Cd": merged_data.get("Cd"), "Hg": merged_data.get("Hg"),
@@ -175,7 +191,6 @@ if uploaded_files and api_key:
                     "DBP", "DIBP", "F", "Cl", "Br", "I", "PFOS", "PFAS", "DATE", "FILE NAME"]
             
             df = pd.DataFrame([table_row])
-            # 補齊空欄位
             for c in cols:
                 if c not in df.columns: df[c] = ""
             df = df[cols]

@@ -8,47 +8,50 @@ import google.generativeai as genai
 import tempfile
 
 # ==========================================
-# 1. 核心功能 (高相容性 Gemini 設定)
+# 1. 核心功能 (最純粹的文字模式)
 # ==========================================
 def analyze_report_with_gemini(api_key, text, filename):
     try:
         genai.configure(api_key=api_key)
         
-        # 使用您列表上有出現的穩定版本
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        # 使用您列表中確認存在的模型名稱
+        # 這裡不加任何 -latest 後綴，直接用標準名稱
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
-        # 這裡改用純文字提示，不使用導致錯誤的 response_schema
+        # 提示詞：明確要求純 JSON 字串
         prompt = f"""
-        You are a chemical test report parser. Extract data from the following file: "{filename}".
-        Return the result **ONLY** as a valid JSON object. Do not add Markdown formatting (```json ... ```).
-
-        ### Data to Extract (JSON Keys):
+        You are a data extraction assistant. 
+        Extract chemical test results from the document "{filename}".
+        
+        Output Requirements:
+        1. Return ONLY a valid JSON object.
+        2. Do NOT use Markdown code blocks (no ```json).
+        3. Do NOT include any explanation text.
+        
+        Data to Extract (use exact keys):
         - "Pb", "Cd", "Hg", "Cr6" (value or "N.D." or "NEGATIVE")
         - "PBBs", "PBDEs" (Sum of sub-items. If all ND, return "N.D.")
         - "DEHP", "BBP", "DBP", "DIBP" (value or "N.D.")
         - "F", "Cl", "Br", "I" (value or "N.D.")
         - "PFOS" (value or "N.D.")
-        - "PFAS_Status" (Set to "REPORT" ONLY if "PFAS" keyword is explicitly in 'Test Requested'. Else null)
+        - "PFAS_Status" (Set to "REPORT" ONLY if "PFAS" keyword is in 'Test Requested'. Else null)
         - "DATE" (YYYY-MM-DD)
 
-        ### Content:
+        Document Content:
         {text[:30000]}
         """
 
-        # 設定回傳格式為 JSON (這是通用的設定，比 Schema 穩定)
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json"
-            )
-        )
+        # 重點：完全不設定 generation_config，避免觸發 API 版本錯誤
+        response = model.generate_content(prompt)
         
-        # 清理回傳的文字 (以防 AI 加了 ```json)
+        # 手動清理回傳的文字 (AI 有時候還是會雞婆加 Markdown)
         raw_text = response.text.strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
+        
+        # 移除可能的 Markdown 標記
+        if "```json" in raw_text:
+            raw_text = raw_text.replace("```json", "").replace("```", "")
+        elif "```" in raw_text:
+            raw_text = raw_text.replace("```", "")
             
         return json.loads(raw_text)
 
@@ -57,7 +60,7 @@ def analyze_report_with_gemini(api_key, text, filename):
         return None
 
 # ==========================================
-# 2. 輔助功能 (無需變動)
+# 2. 輔助功能 (邏輯維持不變)
 # ==========================================
 def get_score(value):
     if not value: return 0
@@ -66,8 +69,10 @@ def get_score(value):
     if "N.D" in v or "ND" in v or "<" in v: return 1
     if "NEG" in v: return 2
     try:
-        num = float(re.findall(r"[-+]?\d*\.\d+|\d+", v)[0])
-        return 100 + num
+        match = re.search(r"[-+]?\d*\.\d+|\d+", v)
+        if match:
+            return 100 + float(match.group())
+        return 0
     except:
         return 0
 
@@ -76,18 +81,21 @@ def merge_results(results_list):
     fields = ["Pb", "Cd", "Hg", "Cr6", "PBBs", "PBDEs", "DEHP", "BBP", "DBP", "DIBP", "F", "Cl", "Br", "I", "PFOS", "PFAS_Status", "DATE"]
     final_data = {f: "" for f in fields}
     
+    # 數值合併邏輯
     for field in fields:
         if field == "DATE": continue
         best_val = ""
         best_score = -1
         for item in results_list:
-            val = item['data'].get(field)
+            # 確保 key 存在，避免報錯
+            val = item['data'].get(field, "")
             score = get_score(val)
             if score > best_score:
                 best_score = score
                 best_val = val
         final_data[field] = best_val if best_val else ""
 
+    # 檔案選取邏輯
     best_filename = results_list[0]['filename']
     max_pb_score = -1
     max_total_score = -1
@@ -105,15 +113,15 @@ def merge_results(results_list):
                 best_filename = item['filename']
 
     main_data = next(r['data'] for r in results_list if r['filename'] == best_filename)
-    final_data['DATE'] = main_data.get("DATE")
+    final_data['DATE'] = main_data.get("DATE", "")
     return final_data, best_filename
 
 # ==========================================
 # 3. Streamlit 介面
 # ==========================================
-st.set_page_config(page_title="通用檢測報告擷取 (Gemini穩定版)", layout="wide")
-st.title("🧪 通用型第三方檢測報告擷取工具 (Google Gemini穩定版)")
-st.markdown("支援 SGS, CTI, Intertek 格式。已修復 404 Model Error。")
+st.set_page_config(page_title="通用檢測報告擷取 (純文字模式)", layout="wide")
+st.title("🧪 通用型第三方檢測報告擷取工具 (兼容模式)")
+st.markdown("支援 SGS, CTI, Intertek 格式。已切換至高相容性模式。")
 
 with st.sidebar:
     st.header("設定")
@@ -149,6 +157,8 @@ if uploaded_files and api_key:
         
         if processed_files:
             merged_data, primary_filename = merge_results(processed_files)
+            
+            # 對應您的 Excel 格式
             table_row = {
                 "ITEM": "1",
                 "Pb": merged_data.get("Pb"), "Cd": merged_data.get("Cd"), "Hg": merged_data.get("Hg"),
@@ -162,7 +172,9 @@ if uploaded_files and api_key:
             
             cols = ["ITEM", "Pb", "Cd", "Hg", "Cr+6", "PBBs", "PBDEs", "DEHP", "BBP", 
                     "DBP", "DIBP", "F", "Cl", "Br", "I", "PFOS", "PFAS", "DATE", "FILE NAME"]
+            
             df = pd.DataFrame([table_row])
+            # 補齊空欄位
             for c in cols:
                 if c not in df.columns: df[c] = ""
             df = df[cols]

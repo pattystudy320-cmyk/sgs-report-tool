@@ -1,4 +1,5 @@
 streamlit
-requests
-pymupdf4llm
+pdfplumber
 pandas
+openpyxl
+xlsxwriter
